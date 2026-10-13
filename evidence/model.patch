@@ -2164,32 +2164,32 @@ HcmV?d00001
 
 diff --git a/evidence/verify_rubric.yaml b/evidence/verify_rubric.yaml
 new file mode 100644
-index 00000000..9771f78f
+index 00000000..05eb9fab
 --- /dev/null
 +++ b/evidence/verify_rubric.yaml
 @@ -0,0 +1,22 @@
 +rubrics:
 +  - id: 1
 +    type: f2p
-+    text: "多个进程或 worker 同时扫描时，同一出站消息代际只有一个持久所有者能够调用渠道发送；同会话后续消息不会越过未收敛的前序消息，不同会话仍可并行。"
++    text: 多个进程或 worker 同时扫描时，同一出站消息代际只有一个持久所有者能够调用渠道发送；同会话后续消息不会越过未收敛的前序消息，不同会话仍可并行。
 +  - id: 2
 +    type: f2p
-+    text: "worker 在渠道调用前退出或租约过期后，新实例可安全接管并完成发送，重启恢复不会让消息永久停留在无主状态。"
++    text: worker 在渠道调用前退出或租约过期后，新实例可安全接管并完成发送，重启恢复不会让消息永久停留在无主状态。
 +  - id: 3
 +    type: f2p
-+    text: "渠道可能已接受但 source_id 或 sent 状态落库失败时，消息进入可观察的未知结果而不是自动盲重发；有现有渠道回执时可自动收敛，没有可靠证据时保留未知状态供显式恢复。"
++    text: 渠道可能已接受但 source_id 或 sent 状态落库失败时，消息进入可观察的未知结果而不是自动盲重发；有现有渠道回执时可自动收敛，没有可靠证据时保留未知状态供显式恢复。
 +  - id: 4
 +    type: f2p
-+    text: "人工重试创建新的发送代际；过期 worker、旧租约完成或旧 WhatsApp 状态晚到均不能覆盖新代际或再次触发发送。"
++    text: 人工重试创建新的发送代际；过期 worker、旧租约完成或旧 WhatsApp 状态晚到均不能覆盖新代际或再次触发发送。
 +  - id: 5
 +    type: f2p
-+    text: "sent、failed 或恢复终态只由当前所有者首次有效提交，消息状态广播、message_updated webhook、回复时间、SLA 和自动化副作用各自不会因竞争或重复完成而执行两次。"
++    text: sent、failed 或恢复终态只由当前所有者首次有效提交，消息状态广播、message_updated webhook、回复时间、SLA 和自动化副作用各自不会因竞争或重复完成而执行两次。
 +  - id: 6
 +    type: p2p
-+    text: "邮件、在线聊天和 WhatsApp 的普通成功与明确失败路径保持可用，在线聊天客户端未连接的既有处理和 WhatsApp source_id 回执关联不回归。"
++    text: 邮件、在线聊天和 WhatsApp 的普通成功与明确失败路径保持可用，在线聊天客户端未连接的既有处理和 WhatsApp source_id 回执关联不回归。
 +  - id: 7
 +    type: p2p
-+    text: "现有客服回复与失败消息手动重试入口、客户端可见状态和同会话 FIFO 行为在无并发故障时保持兼容。"
++    text: 现有客服回复与失败消息手动重试入口、客户端可见状态和同会话 FIFO 行为在无并发故障时保持兼容。
 diff --git a/frontend/apps/main/src/features/conversation/message/MessageBubble.vue b/frontend/apps/main/src/features/conversation/message/MessageBubble.vue
 index 0b1b73a1..4d0d8b46 100644
 --- a/frontend/apps/main/src/features/conversation/message/MessageBubble.vue
