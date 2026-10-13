@@ -10,6 +10,8 @@ import (
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
 	"github.com/abhinavxd/libredesk/internal/streamqueue"
 	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	"github.com/abhinavxd/libredesk/internal/whatsapp/eventlog"
+	"github.com/zerodha/logf"
 )
 
 const (
@@ -29,10 +31,17 @@ type whatsAppJob struct {
 	Body    json.RawMessage `json:"body"`
 }
 
-// WhatsAppIngester is the durable inbound pipeline: a Redis-stream work queue plus per-sender serialization.
+// WhatsAppIngester is the durable inbound pipeline: a Redis-stream work queue, per-sender
+// serialization, and the persistent per-business-event progress store.
 type WhatsAppIngester struct {
 	queue       *streamqueue.Queue
 	sourceLocks *keyedLock
+	events      *eventlog.Store
+	lo          *logf.Logger
+
+	pruneCtx    context.Context
+	pruneCancel context.CancelFunc
+	pruneWg     sync.WaitGroup
 }
 
 // keyedLock serializes work per string key. Entries are refcounted and dropped once the last holder releases.
@@ -47,8 +56,13 @@ type keyedLockEntry struct {
 }
 
 func newWhatsAppIngester(app *App) (*WhatsAppIngester, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	ing := &WhatsAppIngester{
 		sourceLocks: &keyedLock{entries: make(map[string]*keyedLockEntry)},
+		events:      app.whatsappEvents,
+		lo:          app.lo,
+		pruneCtx:    ctx,
+		pruneCancel: cancel,
 	}
 	q, err := streamqueue.New(streamqueue.Opts{
 		Redis:        app.redis,
@@ -60,6 +74,7 @@ func newWhatsAppIngester(app *App) (*WhatsAppIngester, error) {
 		ClaimMinIdle: whatsAppReclaimMinIdle,
 	})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	ing.queue = q
@@ -67,10 +82,44 @@ func newWhatsAppIngester(app *App) (*WhatsAppIngester, error) {
 }
 
 // Run consumes the stream until Close is called.
-func (i *WhatsAppIngester) Run() { i.queue.Run() }
+func (i *WhatsAppIngester) Run() {
+	if i.events != nil {
+		i.pruneWg.Add(1)
+		go i.runEventPrune()
+	}
+	i.queue.Run()
+}
 
 // Close stops the queue and waits for in-flight work. Un-acked deliveries stay durable for the next start.
-func (i *WhatsAppIngester) Close() { i.queue.Close() }
+func (i *WhatsAppIngester) Close() {
+	i.queue.Close()
+	i.pruneCancel()
+	i.pruneWg.Wait()
+}
+
+// runEventPrune periodically deletes terminal progress rows past the retention windows.
+func (i *WhatsAppIngester) runEventPrune() {
+	defer i.pruneWg.Done()
+	ticker := time.NewTicker(waEventPruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-i.pruneCtx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(i.pruneCtx, 30*time.Second)
+			n, err := i.events.Prune(ctx, waEventTerminalRetention, waEventPermanentRetention)
+			cancel()
+			if err != nil {
+				i.lo.Error("error pruning terminal whatsapp business events", "error", err)
+				continue
+			}
+			if n > 0 {
+				i.lo.Info("pruned terminal whatsapp business events", "count", n)
+			}
+		}
+	}
+}
 
 // Enqueue durably stores a raw webhook body for the inbox.
 func (i *WhatsAppIngester) Enqueue(inboxID int, body []byte) error {

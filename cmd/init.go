@@ -58,6 +58,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/view"
 	"github.com/abhinavxd/libredesk/internal/webhook"
 	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
+	whatsappEventLog "github.com/abhinavxd/libredesk/internal/whatsapp/eventlog"
 	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/jmoiron/sqlx"
@@ -907,6 +908,15 @@ func initWhatsAppTemplates(db *sqlx.DB, i18n *i18n.I18n, client *whatsappapi.Cli
 	})
 	if err != nil {
 		log.Fatalf("error initializing whatsapp template manager: %v", err)
+	}
+	return mgr
+}
+
+// initWhatsAppEventStore wires the durable per-business-event progress store for inbound webhooks.
+func initWhatsAppEventStore(db *sqlx.DB) *whatsappEventLog.Store {
+	mgr, err := whatsappEventLog.New(initLogger("whatsapp_events"), db)
+	if err != nil {
+		log.Fatalf("error initializing whatsapp inbound event store: %v", err)
 	}
 	return mgr
 }

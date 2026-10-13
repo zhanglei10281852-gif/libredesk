@@ -1037,8 +1037,23 @@ RETURNING m.uuid, c.uuid AS conversation_uuid, m.meta;
 
 -- name: apply-whatsapp-message-status
 -- Meta guard is monotonic (rank order) and sticky on failure. The enum status only guards against un-failing a failed message.
+-- applied is true only when this receipt advances the lifecycle (or fails it), so duplicate or
+-- out-of-order receipts neither regress state nor produce a repeated websocket broadcast.
 WITH ranks(status, rank) AS (
   VALUES ('sent', 1), ('delivered', 2), ('read', 3), ('failed', 4)
+),
+pre AS (
+  SELECT m.id AS mid,
+         (
+           ($2::message_status = 'failed' AND m.status <> 'failed')
+           OR (
+             COALESCE(m.meta->>'provider_status', '') <> 'failed'
+             AND COALESCE((SELECT rank FROM ranks WHERE status = ($3::jsonb)->>'provider_status'), 0)
+               > COALESCE((SELECT rank FROM ranks WHERE status = m.meta->>'provider_status'), 0)
+           )
+         ) AS applied
+  FROM conversation_messages m
+  WHERE m.source_id = $1
 )
 UPDATE conversation_messages m
 SET status = CASE WHEN m.status != 'failed' THEN $2::message_status ELSE m.status END,
@@ -1055,10 +1070,10 @@ SET status = CASE WHEN m.status != 'failed' THEN $2::message_status ELSE m.statu
       ELSE m.meta
     END,
     updated_at = NOW()
-FROM conversations c
-WHERE m.source_id = $1
+FROM conversations c, pre
+WHERE m.id = pre.mid
   AND c.id = m.conversation_id
-RETURNING m.uuid, c.uuid AS conversation_uuid, m.status, m.meta;
+RETURNING m.uuid, c.uuid AS conversation_uuid, m.status, m.meta, pre.applied;
 
 -- name: get-whatsapp-read-receipt-target
 SELECT cm.source_id, c.inbox_id

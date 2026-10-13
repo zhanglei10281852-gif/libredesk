@@ -1,0 +1,54 @@
+ok  	github.com/abhinavxd/libredesk/internal/whatsapp	3.828s
+?   	github.com/abhinavxd/libredesk/internal/whatsapp/eventlog	[no test files]
+ok  	github.com/abhinavxd/libredesk/internal/whatsapp/template	236.099s
+ok  	github.com/abhinavxd/libredesk/internal/whatsapp/template/models	0.464s
+--- FAIL: TestPreviousConversationsRespectAccessBeforeLimit (8.12s)
+panic: pq: duplicate key value violates unique constraint "pg_database_datname_index" [recovered, repanicked]
+
+goroutine 19 [running]:
+testing.tRunner.func1.2({0x7ff66f9f1a80, 0x15fddb8ed9e0})
+	C:/Program Files/Go/src/testing/testing.go:1974 +0x239
+testing.tRunner.func1()
+	C:/Program Files/Go/src/testing/testing.go:1977 +0x349
+panic({0x7ff66f9f1a80?, 0x15fddb8ed9e0?})
+	C:/Program Files/Go/src/runtime/panic.go:860 +0x13a
+github.com/jmoiron/sqlx.MustExec(...)
+	C:/Users/czxy4/go/pkg/mod/github.com/jmoiron/sqlx@v1.4.0/sqlx.go:725
+github.com/jmoiron/sqlx.(*DB).MustExec(0x7ff66fa8b5f6?, {0x15fddb8988a0?, 0x15fddb7c9c28?}, {0x0?, 0x1?, 0x15fddbbf7bc8?})
+	C:/Users/czxy4/go/pkg/mod/github.com/jmoiron/sqlx@v1.4.0/sqlx.go:369 +0x57
+github.com/abhinavxd/libredesk/internal/testutil.NewDB(0x15fddb8fec00, {0x7ff66fa874a4, 0xf})
+	F:/swe/098832/project-03/internal/testutil/testutil.go:40 +0x2a5
+github.com/abhinavxd/libredesk/internal/conversation.TestPreviousConversationsRespectAccessBeforeLimit(0x15fddb8fec00)
+	F:/swe/098832/project-03/internal/conversation/conversation_test.go:16 +0x36
+testing.tRunner(0x15fddb8fec00, 0x7ff66fadf950)
+	C:/Program Files/Go/src/testing/testing.go:2036 +0xc3
+created by testing.(*T).Run in goroutine 1
+	C:/Program Files/Go/src/testing/testing.go:2101 +0x4a9
+FAIL	github.com/abhinavxd/libredesk/internal/conversation	10.269s
+timestamp=2026-10-13T20:23:41.199+08:00 level=warn message="form field value exceeds maximum length" key=description length=1001 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=2002 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=2003 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=3003 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=3004 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=3005 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=4004 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=4005 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=4006 max=1000 
+timestamp=2026-10-13T20:23:41.436+08:00 level=warn message="form field value exceeds maximum length" key=description length=4007 max=1000 
+--- FAIL: TestServeMediaFileSandboxesDownloads (2.35s)
+    testing.go:1464: TempDir RemoveAll cleanup: unlinkat C:\Users\czxy4\AppData\Local\Temp\TestServeMediaFileSandboxesDownloads3536935258\001\0b7a3c1e-2f4d-4b8a-9c6e-1d2f3a4b5c6d: The process cannot access the file because it is being used by another process.
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.263+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.264+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+timestamp=2026-10-13T20:25:22.265+08:00 level=error message="error handling widget join" error="invalid join data: json: cannot unmarshal array into Go value of type main.WidgetInboxJoinRequest" 
+FAIL
+FAIL	github.com/abhinavxd/libredesk/cmd	104.222s
+FAIL
+ok  	github.com/abhinavxd/libredesk/cmd	194.632s
+?   	github.com/abhinavxd/libredesk/internal/whatsapp/eventlog	[no test files]

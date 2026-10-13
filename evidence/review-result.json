@@ -1,0 +1,49 @@
+{
+  "id": "abhinavxd-libredesk-b67eed79-2223-447c-af6e-b189a3a46089",
+  "expectedSyncRevision": 7,
+  "rounds": 115,
+  "harness": "Trae",
+  "completionStatus": "部分完成",
+  "collectionDecision": "收录：长程题",
+  "reality": "Meta 的一次 webhook 可以携带多个客户消息、发送状态和模板审核变更，LibreDesk 将整段原始请求作为一个 Redis Stream entry 重试。消息、回执和模板分别由会话库、渠道状态与模板表拥有，若任一事件失败就重放整段 payload，会把已成功副作用与未完成工作绑在同一个 delivery 生命周期中，必须在解析、持久进度、队列确认和各状态所有者之间建立逐事件收敛。",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": false,
+      "reason": "业务副作用与 succeeded 进度不是同一原子提交，进度写入失败会让已经执行成功的单元再次进入执行器"
+    },
+    {
+      "id": 3,
+      "passed": false,
+      "reason": "发送者锁只存在于单进程内存，数据库认领没有发送者级互斥或顺序条件"
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": false,
+      "reason": "模板后续动作在事件成功标记之外异步执行，失败和进程退出都不会把目标恢复为待重试"
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "runResult": "1 通过\n2 未通过 业务副作用与 succeeded 进度不是同一原子提交，进度写入失败会让已经执行成功的单元再次进入执行器\n3 未通过 发送者锁只存在于单进程内存，数据库认领没有发送者级互斥或顺序条件\n4 通过\n5 未通过 模板后续动作在事件成功标记之外异步执行，失败和进程退出都不会把目标恢复为待重试\n6 通过\n7 通过",
+  "artifactResult": "1 通过\n2 未通过 业务副作用与 succeeded 进度不是同一原子提交，进度写入失败会让已经执行成功的单元再次进入执行器\n3 未通过 发送者锁只存在于单进程内存，数据库认领没有发送者级互斥或顺序条件\n4 通过\n5 未通过 模板后续动作在事件成功标记之外异步执行，失败和进程退出都不会把目标恢复为待重试\n6 通过\n7 通过",
+  "artifactMaterials": "同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。WhatsApp 包测试和关键 cmd/event 测试通过；广泛 cmd 运行同时出现共享测试数据库重名与 Windows 临时文件占用错误。代码审计确认 succeeded 写入在业务副作用之后、发送者锁仅进程内有效，模板后置动作在成功标记之外异步执行。"
+}

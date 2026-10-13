@@ -1,0 +1,5 @@
+题目：让 WhatsApp 混合 webhook 在局部失败后逐事件恢复
+Session：573311172224344:ec174fdca7a9a09b7b4b78b7350811c1_6ace031868b0b2569578315a.6ace031868b0b2569578315d.6ace031868b0b2569578315b:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/13 18:08:24)
+有效轮数：115｜Harness：Trae｜证据来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：部分完成｜收录：长程题
+同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。WhatsApp 包测试和关键 cmd/event 测试通过；广泛 cmd 运行同时出现共享测试数据库重名与 Windows 临时文件占用错误。代码审计确认 succeeded 写入在业务副作用之后、发送者锁仅进程内有效，模板后置动作在成功标记之外异步执行。

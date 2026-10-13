@@ -60,9 +60,13 @@ func (m *Manager) WhatsAppReadReceiptTarget(uuid string, userID int, messageUUID
 	return row.InboxID, row.SourceID, nil
 }
 
-func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.Time, errorMsg string) error {
+// ApplyWhatsAppStatus applies one outbound receipt and reports whether it advanced the
+// message lifecycle. A duplicate or out-of-order receipt returns (false, nil): state is
+// untouched and no update is broadcast. A missing message row yields ErrMessageNotFound so
+// the caller can wait for the inbound/outbound row within the grace window.
+func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.Time, errorMsg string) (bool, error) {
 	if sourceID == "" || metaStatus == "" {
-		return nil
+		return false, nil
 	}
 	if eventAt.IsZero() {
 		eventAt = time.Now().UTC()
@@ -88,7 +92,7 @@ func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.
 	}
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// The message_status enum collapses delivered/read into sent. The full lifecycle lives in meta.
@@ -102,16 +106,19 @@ func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.
 		ConversationUUID string          `db:"conversation_uuid"`
 		Status           string          `db:"status"`
 		Meta             json.RawMessage `db:"meta"`
+		Applied          bool            `db:"applied"`
 	}
 	if err := m.q.ApplyWhatsAppMessageStatus.Get(&row, sourceID, dbStatus, patchBytes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("status update for source_id=%s status=%s: %w", sourceID, metaStatus, ErrMessageNotFound)
+			return false, fmt.Errorf("status update for source_id=%s status=%s: %w", sourceID, metaStatus, ErrMessageNotFound)
 		}
 		m.lo.Error("error applying whatsapp message status", "source_id", sourceID, "error", err)
-		return err
+		return false, err
 	}
-	m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": row.Status, "meta": stripCSATUUID(row.Meta)})
-	return nil
+	if row.Applied {
+		m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": row.Status, "meta": stripCSATUUID(row.Meta)})
+	}
+	return row.Applied, nil
 }
 
 func (m *Manager) RecordWhatsAppSendFailure(messageUUID, errorMsg string) error {

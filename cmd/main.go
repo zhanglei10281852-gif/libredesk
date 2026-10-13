@@ -55,6 +55,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/abhinavxd/libredesk/internal/webhook"
 	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
+	whatsappEventLog "github.com/abhinavxd/libredesk/internal/whatsapp/eventlog"
 	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/knadh/go-i18n"
@@ -143,6 +144,7 @@ type App struct {
 	importer           *importer.Importer
 	whatsappTemplate   *whatsappTemplate.Manager
 	whatsappClient     *whatsappapi.Client
+	whatsappEvents     *whatsappEventLog.Store
 	whatsappIngester   atomic.Pointer[WhatsAppIngester]
 	whatsappIngesterMu sync.Mutex
 	// Inbox IDs whose provider credentials were recently rejected, keyed to the last error time.
@@ -288,6 +290,7 @@ func main() {
 
 	waClient := initWhatsAppClient()
 	waTemplates := initWhatsAppTemplates(db, i18n, waClient, inbox)
+	waEvents := initWhatsAppEventStore(db)
 	conversation.SetWhatsAppTemplateStore(waTemplates)
 	conversation.SetArticleReferenceStore(helpCenter)
 
@@ -355,6 +358,7 @@ func main() {
 		userNotification: userNotification,
 		whatsappClient:   waClient,
 		whatsappTemplate: waTemplates,
+		whatsappEvents:   waEvents,
 		notificationPref: notificationPreference,
 		pushNotification: pushNotification,
 		wsHub:            wsHub,

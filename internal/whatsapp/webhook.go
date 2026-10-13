@@ -160,89 +160,156 @@ func ParsePayload(body []byte) (*WebhookPayload, error) {
 	return &p, nil
 }
 
+// Business event kinds produced by EnumerateEvents.
+const (
+	EventKindMessage  = "message"
+	EventKindStatus   = "status"
+	EventKindTemplate = "template"
+)
+
+// PayloadEvent is one business event extracted from a delivery. EntryIdx/ChangeIdx/ItemIdx
+// are the event's stable coordinates inside the payload and make synthetic keys stable for
+// identity-less (malformed) items across byte-identical Meta redeliveries.
+type PayloadEvent struct {
+	Kind      string
+	EntryIdx  int
+	ChangeIdx int
+	ItemIdx   int
+	Message   ParsedMessage
+	Status    ParsedStatus
+	Template  ParsedTemplateStatus
+}
+
+// EnumerateEvents returns every business event in a delivery in one stable order:
+// inbound messages first, then outbound status receipts, then template status updates,
+// each group in payload (entry, change, array-index) order.
+func (p *WebhookPayload) EnumerateEvents() []PayloadEvent {
+	var (
+		messages  []PayloadEvent
+		statuses  []PayloadEvent
+		templates []PayloadEvent
+	)
+	for ei, e := range p.Entry {
+		for ci, c := range e.Changes {
+			switch c.Field {
+			case "messages":
+				namesByWAID := make(map[string]string, len(c.Value.Contacts))
+				for _, ct := range c.Value.Contacts {
+					namesByWAID[ct.WAID] = ct.Profile.Name
+				}
+				for mi, m := range c.Value.Messages {
+					contactName, ok := namesByWAID[m.From]
+					if !ok && len(c.Value.Contacts) == 1 {
+						contactName = c.Value.Contacts[0].Profile.Name
+					}
+					pm := ParsedMessage{
+						From:          m.From,
+						ID:            m.ID,
+						Timestamp:     parseUnixSeconds(m.Timestamp),
+						Type:          m.Type,
+						ContactName:   contactName,
+						PhoneNumberID: c.Value.Metadata.PhoneNumberID,
+					}
+					if m.Context != nil {
+						pm.ContextID = m.Context.ID
+					}
+					switch m.Type {
+					case "text":
+						if m.Text != nil {
+							pm.Text = m.Text.Body
+						}
+					case "image":
+						applyMedia(&pm, m.Image)
+					case "video":
+						applyMedia(&pm, m.Video)
+					case "audio":
+						applyMedia(&pm, m.Audio)
+					case "voice":
+						applyMedia(&pm, m.Voice)
+					case "document":
+						applyMedia(&pm, m.Document)
+					case "sticker":
+						applyMedia(&pm, m.Sticker)
+					case "interactive":
+						if m.Interactive != nil {
+							if m.Interactive.ButtonReply != nil {
+								pm.ButtonReplyID = m.Interactive.ButtonReply.ID
+								pm.Text = m.Interactive.ButtonReply.Title
+							}
+							if m.Interactive.ListReply != nil {
+								pm.ListReplyID = m.Interactive.ListReply.ID
+								pm.Text = m.Interactive.ListReply.Title
+							}
+						}
+					case "button":
+						if m.Button != nil {
+							pm.ButtonReplyID = m.Button.Payload
+							pm.Text = m.Button.Text
+						}
+					case "location":
+						if m.Location != nil {
+							pm.Text = locationText(m.Location.Name, m.Location.Address, m.Location.Latitude.String(), m.Location.Longitude.String())
+						}
+					case "contacts":
+						var lines []string
+						for _, ct := range m.Contacts {
+							phone := ""
+							if len(ct.Phones) > 0 {
+								phone = ct.Phones[0].Phone
+							}
+							lines = append(lines, strings.TrimSpace(strings.TrimSuffix(ct.Name.FormattedName+" "+phone, " ")))
+						}
+						pm.Text = strings.Join(lines, "\n")
+					case "system":
+						if m.System != nil {
+							pm.SystemType = m.System.Type
+							pm.SystemNewWAID = firstNonEmptyStr(m.System.NewWAID, m.System.WAID)
+							pm.Text = m.System.Body
+						}
+					}
+					messages = append(messages, PayloadEvent{
+						Kind: EventKindMessage, EntryIdx: ei, ChangeIdx: ci, ItemIdx: mi, Message: pm,
+					})
+				}
+				for si, s := range c.Value.Statuses {
+					ps := ParsedStatus{
+						MessageID: s.ID,
+						Status:    s.Status,
+						Timestamp: parseUnixSeconds(s.Timestamp),
+					}
+					if len(s.Errors) > 0 {
+						err := s.Errors[0]
+						ps.UserMsg = firstNonEmptyStr(err.ErrorData.Details, err.UserMsg, err.Message)
+					}
+					statuses = append(statuses, PayloadEvent{
+						Kind: EventKindStatus, EntryIdx: ei, ChangeIdx: ci, ItemIdx: si, Status: ps,
+					})
+				}
+			case "message_template_status_update":
+				templates = append(templates, PayloadEvent{
+					Kind:      EventKindTemplate,
+					EntryIdx:  ei,
+					ChangeIdx: ci,
+					Template: ParsedTemplateStatus{
+						WABAID:         e.ID,
+						Event:          c.Value.Event,
+						TemplateName:   c.Value.MessageTemplateName,
+						Language:       c.Value.MessageTemplateLanguage,
+						Reason:         c.Value.Reason,
+						MetaTemplateID: stringifyTemplateID(c.Value.MessageTemplateID),
+					},
+				})
+			}
+		}
+	}
+	return append(append(messages, statuses...), templates...)
+}
+
 func (p *WebhookPayload) ExtractMessages() []ParsedMessage {
 	var out []ParsedMessage
-	for _, e := range p.Entry {
-		for _, c := range e.Changes {
-			if c.Field != "messages" {
-				continue
-			}
-			namesByWAID := make(map[string]string, len(c.Value.Contacts))
-			for _, ct := range c.Value.Contacts {
-				namesByWAID[ct.WAID] = ct.Profile.Name
-			}
-			for _, m := range c.Value.Messages {
-				contactName, ok := namesByWAID[m.From]
-				if !ok && len(c.Value.Contacts) == 1 {
-					contactName = c.Value.Contacts[0].Profile.Name
-				}
-				pm := ParsedMessage{
-					From:          m.From,
-					ID:            m.ID,
-					Timestamp:     parseUnixSeconds(m.Timestamp),
-					Type:          m.Type,
-					ContactName:   contactName,
-					PhoneNumberID: c.Value.Metadata.PhoneNumberID,
-				}
-				if m.Context != nil {
-					pm.ContextID = m.Context.ID
-				}
-				switch m.Type {
-				case "text":
-					if m.Text != nil {
-						pm.Text = m.Text.Body
-					}
-				case "image":
-					applyMedia(&pm, m.Image)
-				case "video":
-					applyMedia(&pm, m.Video)
-				case "audio":
-					applyMedia(&pm, m.Audio)
-				case "voice":
-					applyMedia(&pm, m.Voice)
-				case "document":
-					applyMedia(&pm, m.Document)
-				case "sticker":
-					applyMedia(&pm, m.Sticker)
-				case "interactive":
-					if m.Interactive != nil {
-						if m.Interactive.ButtonReply != nil {
-							pm.ButtonReplyID = m.Interactive.ButtonReply.ID
-							pm.Text = m.Interactive.ButtonReply.Title
-						}
-						if m.Interactive.ListReply != nil {
-							pm.ListReplyID = m.Interactive.ListReply.ID
-							pm.Text = m.Interactive.ListReply.Title
-						}
-					}
-				case "button":
-					if m.Button != nil {
-						pm.ButtonReplyID = m.Button.Payload
-						pm.Text = m.Button.Text
-					}
-				case "location":
-					if m.Location != nil {
-						pm.Text = locationText(m.Location.Name, m.Location.Address, m.Location.Latitude.String(), m.Location.Longitude.String())
-					}
-				case "contacts":
-					var lines []string
-					for _, c := range m.Contacts {
-						phone := ""
-						if len(c.Phones) > 0 {
-							phone = c.Phones[0].Phone
-						}
-						lines = append(lines, strings.TrimSpace(strings.TrimSuffix(c.Name.FormattedName+" "+phone, " ")))
-					}
-					pm.Text = strings.Join(lines, "\n")
-				case "system":
-					if m.System != nil {
-						pm.SystemType = m.System.Type
-						pm.SystemNewWAID = firstNonEmptyStr(m.System.NewWAID, m.System.WAID)
-						pm.Text = m.System.Body
-					}
-				}
-				out = append(out, pm)
-			}
+	for _, ev := range p.EnumerateEvents() {
+		if ev.Kind == EventKindMessage {
+			out = append(out, ev.Message)
 		}
 	}
 	return out
@@ -250,23 +317,9 @@ func (p *WebhookPayload) ExtractMessages() []ParsedMessage {
 
 func (p *WebhookPayload) ExtractStatuses() []ParsedStatus {
 	var out []ParsedStatus
-	for _, e := range p.Entry {
-		for _, c := range e.Changes {
-			if c.Field != "messages" {
-				continue
-			}
-			for _, s := range c.Value.Statuses {
-				ps := ParsedStatus{
-					MessageID: s.ID,
-					Status:    s.Status,
-					Timestamp: parseUnixSeconds(s.Timestamp),
-				}
-				if len(s.Errors) > 0 {
-					err := s.Errors[0]
-					ps.UserMsg = firstNonEmptyStr(err.ErrorData.Details, err.UserMsg, err.Message)
-				}
-				out = append(out, ps)
-			}
+	for _, ev := range p.EnumerateEvents() {
+		if ev.Kind == EventKindStatus {
+			out = append(out, ev.Status)
 		}
 	}
 	return out
@@ -274,19 +327,9 @@ func (p *WebhookPayload) ExtractStatuses() []ParsedStatus {
 
 func (p *WebhookPayload) ExtractTemplateStatusUpdates() []ParsedTemplateStatus {
 	var out []ParsedTemplateStatus
-	for _, e := range p.Entry {
-		for _, c := range e.Changes {
-			if c.Field != "message_template_status_update" {
-				continue
-			}
-			out = append(out, ParsedTemplateStatus{
-				WABAID:         e.ID,
-				Event:          c.Value.Event,
-				TemplateName:   c.Value.MessageTemplateName,
-				Language:       c.Value.MessageTemplateLanguage,
-				Reason:         c.Value.Reason,
-				MetaTemplateID: stringifyTemplateID(c.Value.MessageTemplateID),
-			})
+	for _, ev := range p.EnumerateEvents() {
+		if ev.Kind == EventKindTemplate {
+			out = append(out, ev.Template)
 		}
 	}
 	return out

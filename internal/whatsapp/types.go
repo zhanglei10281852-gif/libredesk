@@ -123,38 +123,38 @@ type templateListResponse struct {
 }
 
 type ParsedMessage struct {
-	From          string
-	ID            string
-	Timestamp     time.Time
-	Type          string
-	Text          string
-	ButtonReplyID string
-	ListReplyID   string
-	MediaID       string
-	MediaMimeType string
-	Caption       string
-	Filename      string
-	ContactName   string
-	PhoneNumberID string
-	ContextID     string
-	SystemType    string
-	SystemNewWAID string
+	From          string    `json:"from"`
+	ID            string    `json:"id"`
+	Timestamp     time.Time `json:"timestamp"`
+	Type          string    `json:"type"`
+	Text          string    `json:"text"`
+	ButtonReplyID string    `json:"button_reply_id"`
+	ListReplyID   string    `json:"list_reply_id"`
+	MediaID       string    `json:"media_id"`
+	MediaMimeType string    `json:"media_mime_type"`
+	Caption       string    `json:"caption"`
+	Filename      string    `json:"filename"`
+	ContactName   string    `json:"contact_name"`
+	PhoneNumberID string    `json:"phone_number_id"`
+	ContextID     string    `json:"context_id"`
+	SystemType    string    `json:"system_type"`
+	SystemNewWAID string    `json:"system_new_wa_id"`
 }
 
 type ParsedStatus struct {
-	MessageID string
-	Status    string
-	Timestamp time.Time
-	UserMsg   string
+	MessageID string    `json:"message_id"`
+	Status    string    `json:"status"`
+	Timestamp time.Time `json:"timestamp"`
+	UserMsg   string    `json:"user_msg"`
 }
 
 type ParsedTemplateStatus struct {
-	WABAID         string
-	Event          string
-	TemplateName   string
-	Language       string
-	Reason         string
-	MetaTemplateID string
+	WABAID         string `json:"waba_id"`
+	Event          string `json:"event"`
+	TemplateName   string `json:"template_name"`
+	Language       string `json:"language"`
+	Reason         string `json:"reason"`
+	MetaTemplateID string `json:"meta_template_id"`
 }
 
 func (a Account) Version() string {

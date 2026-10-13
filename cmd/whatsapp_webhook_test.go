@@ -19,6 +19,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/testutil"
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	whatsappEventLog "github.com/abhinavxd/libredesk/internal/whatsapp/eventlog"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
@@ -408,7 +409,13 @@ func newInboxApp(t *testing.T) (*App, *sqlx.DB) {
 	if err != nil {
 		t.Fatalf("inbox.New: %v", err)
 	}
-	return &App{lo: &lo, i18n: lang, inbox: mgr}, db
+	events, err := whatsappEventLog.New(&lo, db)
+	if err != nil {
+		t.Fatalf("eventlog.New: %v", err)
+	}
+	app := &App{lo: &lo, i18n: lang, inbox: mgr, whatsappEvents: events}
+	app.consts.Store(&constants{MaxFileUploadSizeMB: 25})
+	return app, db
 }
 
 // An install with no WhatsApp inbox must boot with Redis unreachable.

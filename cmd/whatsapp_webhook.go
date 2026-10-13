@@ -14,14 +14,12 @@ import (
 	"time"
 
 	"github.com/abhinavxd/libredesk/internal/attachment"
-	"github.com/abhinavxd/libredesk/internal/conversation"
 	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
 	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	"github.com/abhinavxd/libredesk/internal/whatsapp"
-	wtmodels "github.com/abhinavxd/libredesk/internal/whatsapp/template/models"
 	"github.com/valyala/fasthttp"
 	"github.com/volatiletech/null/v9"
 	"github.com/zerodha/fastglue"
@@ -122,58 +120,6 @@ func handleWhatsAppWebhookEvent(r *fastglue.Request) error {
 	}
 
 	return r.SendEnvelope(map[string]string{"status": "ok"})
-}
-
-// processWhatsAppPayload applies every message/status/template event in one delivery. Returning an error retries the whole delivery.
-func processWhatsAppPayload(ctx context.Context, app *App, inboxID int, payload *whatsapp.WebhookPayload) error {
-	var errs []error
-
-	for _, msg := range payload.ExtractMessages() {
-		if err := ingestWhatsAppMessage(ctx, app, inboxID, msg); err != nil {
-			app.lo.Error("error ingesting whatsapp message", "inbox_id", inboxID, "wa_message_id", msg.ID, "error", err)
-			errs = append(errs, err)
-		}
-	}
-
-	for _, st := range payload.ExtractStatuses() {
-		if err := app.conversation.ApplyWhatsAppStatus(st.MessageID, st.Status, st.Timestamp, st.UserMsg); err != nil {
-			if errors.Is(err, conversation.ErrMessageNotFound) && time.Since(st.Timestamp) > whatsAppStatusNotFoundGrace {
-				app.lo.Warn("dropping whatsapp status for unknown message", "wa_message_id", st.MessageID, "status", st.Status, "event_at", st.Timestamp)
-			} else {
-				app.lo.Error("error applying whatsapp status update", "wa_message_id", st.MessageID, "status", st.Status, "error", err)
-				errs = append(errs, err)
-			}
-		}
-	}
-
-	templateUpdates := payload.ExtractTemplateStatusUpdates()
-	if app.whatsappTemplate != nil && len(templateUpdates) > 0 {
-		wabaInboxes, err := whatsAppInboxIDsByWABA(app)
-		if err != nil {
-			app.lo.Error("error listing inboxes for template status updates", "error", err)
-			errs = append(errs, err)
-			wabaInboxes = map[string][]int{}
-		}
-		for _, ts := range templateUpdates {
-			ids := wabaInboxes[ts.WABAID]
-			if ts.WABAID == "" {
-				ids = []int{inboxID}
-			}
-			for _, ibID := range ids {
-				if err := app.whatsappTemplate.HandleStatusUpdate(ibID, ts.MetaTemplateID, ts.TemplateName, ts.Language, ts.Event, ts.Reason); err != nil {
-					app.lo.Error("error applying template status update", "inbox_id", ibID, "name", ts.TemplateName, "event", ts.Event, "error", err)
-					errs = append(errs, err)
-					continue
-				}
-				// An edit skipped while the template was under review can now be applied.
-				if ts.TemplateName == wtmodels.CSATTemplateName(ibID) {
-					go ensureWhatsAppCSATTemplate(app, ibID)
-				}
-			}
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
 func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsapp.ParsedMessage) error {

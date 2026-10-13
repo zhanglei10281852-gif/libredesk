@@ -553,6 +553,32 @@ CREATE UNIQUE INDEX index_unique_whatsapp_templates_on_inbox_name_language ON wh
 CREATE INDEX index_whatsapp_templates_on_inbox_id ON whatsapp_templates (inbox_id);
 CREATE INDEX index_whatsapp_templates_on_meta_template_id ON whatsapp_templates (meta_template_id);
 
+-- Per-business-event processing progress for inbound WhatsApp webhook deliveries.
+-- One row per inbound message, outbound status receipt, or template-status fan-out target.
+-- The stable event_key survives worker reclaim, process restart and byte-identical Meta redeliveries.
+DROP TABLE IF EXISTS whatsapp_inbound_events CASCADE;
+CREATE TABLE whatsapp_inbound_events (
+	id BIGSERIAL PRIMARY KEY,
+	created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+	processed_at TIMESTAMPTZ NULL,
+	event_key TEXT NOT NULL,
+	inbox_id BIGINT NOT NULL,
+	kind TEXT NOT NULL,
+	payload JSONB DEFAULT '{}'::jsonb NOT NULL,
+	status TEXT DEFAULT 'pending' NOT NULL,
+	attempts INT DEFAULT 0 NOT NULL,
+	last_error TEXT NULL,
+	last_error_at TIMESTAMPTZ NULL,
+	not_before TIMESTAMPTZ NULL,
+	lease_owner TEXT NULL,
+	lease_at TIMESTAMPTZ NULL,
+	CONSTRAINT constraint_whatsapp_inbound_events_on_kind CHECK (kind IN ('message', 'status', 'template')),
+	CONSTRAINT constraint_whatsapp_inbound_events_on_status CHECK (status IN ('pending', 'deferred', 'processing', 'succeeded', 'ignored', 'permanent'))
+);
+CREATE UNIQUE INDEX index_unique_whatsapp_inbound_events_on_event_key ON whatsapp_inbound_events (event_key);
+CREATE INDEX index_whatsapp_inbound_events_on_status_updated_at ON whatsapp_inbound_events (status, updated_at);
+
 DROP TABLE IF EXISTS conversation_tags CASCADE;
 CREATE TABLE conversation_tags (
 	id BIGSERIAL PRIMARY KEY,

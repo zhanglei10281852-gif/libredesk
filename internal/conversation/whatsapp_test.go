@@ -2,11 +2,13 @@ package conversation
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abhinavxd/libredesk/internal/conversation/models"
 	"github.com/abhinavxd/libredesk/internal/dbutil"
@@ -149,6 +151,111 @@ func TestQueueWhatsAppReplyVariables(t *testing.T) {
 			t.Fatalf("expected rendered content to exceed the limit, got %v", err)
 		}
 	})
+}
+
+// Duplicate/out-of-order receipts must not regress lifecycle progress or repeat broadcasts.
+func TestApplyWhatsAppStatusMonotonic(t *testing.T) {
+	db := testutil.NewDB(t, "whatsapp_status_monotonic")
+	lo := logf.New(logf.Opts{Level: logf.FatalLevel})
+	lang := testutil.NewI18n(t)
+	inboxes, err := inbox.New(&lo, db, lang, "0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, err := user.New(lang, user.Opts{DB: db, Lo: &lo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		db: db, lo: &lo, i18n: lang, inboxStore: inboxes, userStore: users,
+		webhookStore: whatsAppReplyWebhook{}, wsHub: ws.NewHub(&lo, nil /** userStore **/),
+	}
+	if err := dbutil.ScanSQLFile("queries.sql", &m.q, db, efs); err != nil {
+		t.Fatal(err)
+	}
+
+	var contactID, agentID, inboxID int
+	if err := db.Get(&contactID, `INSERT INTO users (type, first_name) VALUES ('contact', 'Customer') RETURNING id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&agentID, `INSERT INTO users (type, email, first_name) VALUES ('agent', 'a@b.test', 'Agent') RETURNING id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&inboxID, `INSERT INTO inboxes (channel, name, "from") VALUES ('whatsapp', 'WA', '') RETURNING id`); err != nil {
+		t.Fatal(err)
+	}
+	var conversationID int
+	if err := db.Get(&conversationID, `INSERT INTO conversations (contact_id, inbox_id, status_id)
+		VALUES ($1, $2, (SELECT id FROM conversation_statuses WHERE category = 'open' LIMIT 1)) RETURNING id`,
+		contactID, inboxID); err != nil {
+		t.Fatal(err)
+	}
+	seedOutgoing := func(sourceID string) {
+		if _, err := db.Exec(`INSERT INTO conversation_messages
+			(conversation_id, sender_id, sender_type, type, status, content, text_content, content_type, source_id, meta)
+			VALUES ($1, $2, 'agent', 'outgoing', 'sent', 'hi', 'hi', 'text', $3, '{}'::jsonb)`,
+			conversationID, agentID, sourceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	providerStatus := func(sourceID string) string {
+		var st string
+		if err := db.Get(&st, `SELECT meta->>'provider_status' FROM conversation_messages WHERE source_id = $1`, sourceID); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	seedOutgoing("wamid.mono.read")
+	applied, err := m.ApplyWhatsAppStatus("wamid.mono.read", WhatsAppStatusRead, time.Now(), "")
+	if err != nil || !applied {
+		t.Fatalf("read should apply: applied=%v err=%v", applied, err)
+	}
+	if got := providerStatus("wamid.mono.read"); got != WhatsAppStatusRead {
+		t.Fatalf("provider status = %q, want read", got)
+	}
+	// Out-of-order delivered after read.
+	applied, err = m.ApplyWhatsAppStatus("wamid.mono.read", WhatsAppStatusDelivered, time.Now(), "")
+	if err != nil || applied {
+		t.Fatalf("late delivered must be a no-op: applied=%v err=%v", applied, err)
+	}
+	if got := providerStatus("wamid.mono.read"); got != WhatsAppStatusRead {
+		t.Fatalf("late delivered regressed provider status to %q", got)
+	}
+	// Identical duplicate receipt.
+	applied, _ = m.ApplyWhatsAppStatus("wamid.mono.read", WhatsAppStatusRead, time.Now(), "")
+	if applied {
+		t.Fatal("duplicate read receipt must not be re-applied")
+	}
+
+	// Failed is sticky: no later receipt can revive the message.
+	seedOutgoing("wamid.mono.failed")
+	applied, err = m.ApplyWhatsAppStatus("wamid.mono.failed", WhatsAppStatusFailed, time.Now(), "boom")
+	if err != nil || !applied {
+		t.Fatalf("failed should apply: applied=%v err=%v", applied, err)
+	}
+	applied, _ = m.ApplyWhatsAppStatus("wamid.mono.failed", WhatsAppStatusRead, time.Now(), "")
+	if applied {
+		t.Fatal("read after failed must be a no-op")
+	}
+	var dbStatus, reason string
+	if err := db.Get(&dbStatus, `SELECT status FROM conversation_messages WHERE source_id = 'wamid.mono.failed'`); err != nil {
+		t.Fatal(err)
+	}
+	if dbStatus != "failed" {
+		t.Fatalf("db status = %q, want failed", dbStatus)
+	}
+	if err := db.Get(&reason, `SELECT meta->>'provider_failure_reason' FROM conversation_messages WHERE source_id = 'wamid.mono.failed'`); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "boom" {
+		t.Fatalf("failure reason = %q, want boom", reason)
+	}
+
+	// Unknown wamid surfaces ErrMessageNotFound so the caller parks the receipt in the grace window.
+	if _, err := m.ApplyWhatsAppStatus("wamid.never", WhatsAppStatusDelivered, time.Now(), ""); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("expected ErrMessageNotFound, got %v", err)
+	}
 }
 
 func TestRenderTemplateBody(t *testing.T) {
