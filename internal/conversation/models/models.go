@@ -45,6 +45,11 @@ var (
 	MessageStatusSent     = "sent"
 	MessageStatusFailed   = "failed"
 	MessageStatusReceived = "received"
+	// MessageStatusUnknown means the channel may have accepted the message,
+	// but the owner died before the result (source id / terminal status)
+	// could be persisted. Such messages are never auto-resent; they wait for
+	// a channel receipt or an explicit manual recovery.
+	MessageStatusUnknown = "unknown"
 
 	ActivityStatusChange        = "status_change"
 	ActivityPriorityChange      = "priority_change"
@@ -363,6 +368,19 @@ type Message struct {
 	MessageReceiverID int                    `db:"message_receiver_id" json:"-"`
 	Media             []mmodels.Media        `json:"-"`
 	Author            MessageAuthor          `db:"author" json:"author"`
+
+	// SendGeneration identifies one logical send attempt. It is bumped by a
+	// manual retry so late owners/receipts of an old generation can never
+	// overwrite the new one.
+	SendGeneration int64 `db:"send_generation" json:"-"`
+	// SendOwner is the lease token of the instance currently dispatching the
+	// message; empty once a terminal status is committed.
+	SendOwner     null.String `db:"send_owner" json:"-"`
+	SendLeaseUntil null.Time   `db:"send_lease_until" json:"-"`
+	// SendStartedAt is stamped immediately before the channel is called. A
+	// pending row with a non-null stamp and an expired lease means the owner
+	// died around the channel call and the result is unknown.
+	SendStartedAt null.Time `db:"send_started_at" json:"-"`
 }
 
 // IsContinuityMessage returns true if the message is a continuity email.
@@ -482,6 +500,10 @@ type OutboundMessage struct {
 	// Core message identifiers
 	UUID             string
 	ConversationUUID string
+	// SendGeneration is the lease generation owning this dispatch attempt.
+	// Channels must attach it to any out-of-band persistence callbacks so
+	// stale owners cannot overwrite a newer generation.
+	SendGeneration int64
 
 	// Sender info
 	SenderID          int
@@ -521,6 +543,7 @@ func (m *Message) ToOutbound() OutboundMessage {
 	return OutboundMessage{
 		UUID:              m.UUID,
 		ConversationUUID:  m.ConversationUUID,
+		SendGeneration:    m.SendGeneration,
 		SenderID:          m.SenderID,
 		MessageReceiverID: m.MessageReceiverID,
 		Content:           m.Content,

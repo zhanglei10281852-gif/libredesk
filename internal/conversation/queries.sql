@@ -834,6 +834,11 @@ ORDER BY (m.type = 'outgoing') DESC, m.id DESC
 LIMIT 1;
 
 -- name: get-outgoing-pending-messages
+-- Peeks at the next dispatchable message head per conversation. This does NOT
+-- take ownership: workers must atomically claim a row with
+-- claim-outgoing-message. A message stuck in 'unknown' (the channel may have
+-- accepted it) blocks later messages of the same conversation to preserve
+-- send order until it converges or is manually retried.
 SELECT
     m.id,
     m.created_at,
@@ -854,6 +859,10 @@ SELECT
     m.content_type,
     m.source_id,
     m.meta,
+    m.send_generation,
+    m.send_owner,
+    m.send_lease_until,
+    m.send_started_at,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'cc')) AS cc,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'bcc')) AS bcc,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'to')) AS to,
@@ -870,12 +879,148 @@ AND NOT EXISTS (
     SELECT 1
     FROM conversation_messages earlier
     WHERE earlier.conversation_id = m.conversation_id
-      AND earlier.status = 'pending'
+      AND earlier.status IN ('pending', 'unknown')
       AND earlier.type = 'outgoing'
       AND earlier.private = false
       AND earlier.id < m.id
 )
 ORDER BY m.id
+
+-- name: claim-outgoing-message
+-- Atomically takes exclusive, expiring ownership of one outgoing message
+-- generation for the calling owner. The row must be the pending head of its
+-- conversation (an earlier pending/unknown message blocks it), never have
+-- reached the channel (send_started_at IS NULL), and be free of any live
+-- lease. SKIP LOCKED lets multiple instances race safely.
+WITH candidate AS (
+    SELECT m.id
+    FROM conversation_messages m
+    WHERE m.id = $1
+      AND m.type = 'outgoing'
+      AND m.private = false
+      AND m.status = 'pending'
+      AND m.send_started_at IS NULL
+      AND (m.send_lease_until IS NULL OR m.send_lease_until < NOW())
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation_messages earlier
+          WHERE earlier.conversation_id = m.conversation_id
+            AND earlier.type = 'outgoing'
+            AND earlier.private = false
+            AND earlier.id < m.id
+            AND earlier.status IN ('pending', 'unknown')
+      )
+    FOR UPDATE OF m SKIP LOCKED
+)
+UPDATE conversation_messages m
+SET send_owner = $2,
+    send_lease_until = NOW() + $3::interval,
+    updated_at = NOW()
+FROM candidate
+WHERE candidate.id = m.id
+RETURNING
+    m.id,
+    m.created_at,
+    m.updated_at,
+    m.status,
+    m.type,
+    m.content,
+    m.text_content,
+    m.sender_type,
+    m.content_type,
+    m.conversation_id,
+    m.uuid,
+    m.private,
+    m.sender_id,
+    m.meta,
+    m.source_id,
+    m.send_generation,
+    m.send_owner,
+    m.send_lease_until,
+    m.send_started_at,
+    (SELECT c.uuid FROM conversations c WHERE c.id = m.conversation_id) AS conversation_uuid,
+    ARRAY(SELECT jsonb_array_elements_text(m.meta->'cc')) AS cc,
+    ARRAY(SELECT jsonb_array_elements_text(m.meta->'bcc')) AS bcc,
+    ARRAY(SELECT jsonb_array_elements_text(m.meta->'to')) AS to,
+    (SELECT c.inbox_id FROM conversations c WHERE c.id = m.conversation_id) AS inbox_id,
+    (SELECT c.subject FROM conversations c WHERE c.id = m.conversation_id) AS subject,
+    (SELECT c.contact_id FROM conversations c WHERE c.id = m.conversation_id) AS message_receiver_id
+
+-- name: renew-outgoing-message-lease
+-- Heartbeat. Returns no row once ownership is lost (lease stolen by another
+-- owner or the generation advanced), which must stop further side effects.
+UPDATE conversation_messages
+SET send_lease_until = NOW() + $3::interval
+WHERE uuid = $1
+  AND send_generation = $2
+  AND send_owner = $4
+  AND status = 'pending'
+
+-- name: mark-outgoing-dispatch-started
+-- Stamped immediately before the channel is invoked. After this point the
+-- channel may have accepted the message, so an expired lease can no longer be
+-- treated as a safe resend: recovery moves the row to 'unknown'.
+UPDATE conversation_messages
+SET send_started_at = NOW(),
+    send_lease_until = GREATEST(COALESCE(send_lease_until, NOW()), NOW() + $4::interval)
+WHERE uuid = $1
+  AND send_generation = $2
+  AND send_owner = $3
+  AND status = 'pending'
+
+-- name: commit-outgoing-terminal
+-- Only the current owner of the current generation while the row is still
+-- pending may commit a terminal status. A stale owner after lease loss, a
+-- generation superseded by a manual retry, or a row already finalized by a
+-- channel receipt matches nothing, so side effects never fire twice.
+UPDATE conversation_messages m
+SET status = $4::message_status,
+    source_id = COALESCE(NULLIF($5, ''), m.source_id),
+    meta = COALESCE(m.meta, '{}'::jsonb) || $6::jsonb,
+    send_owner = NULL,
+    send_lease_until = NULL,
+    updated_at = NOW()
+FROM conversations c
+WHERE m.uuid = $1
+  AND c.id = m.conversation_id
+  AND m.send_generation = $2
+  AND m.send_owner = $3
+  AND m.status = 'pending'
+RETURNING
+    m.id,
+    m.uuid,
+    m.status,
+    m.meta,
+    m.sender_id,
+    m.conversation_id,
+    c.uuid AS conversation_uuid
+
+-- name: recover-interrupted-dispatches
+-- Rows whose owner stamped dispatch-start and then let the lease expire may
+-- have been accepted by the channel; move them to 'unknown' instead of ever
+-- resending blindly.
+UPDATE conversation_messages m
+SET status = 'unknown',
+    send_owner = NULL,
+    send_lease_until = NULL,
+    meta = COALESCE(m.meta, '{}'::jsonb) || $1::jsonb,
+    updated_at = NOW()
+FROM conversations c
+WHERE c.id = m.conversation_id
+  AND m.type = 'outgoing'
+  AND m.private = false
+  AND m.status = 'pending'
+  AND m.send_started_at IS NOT NULL
+  AND m.send_lease_until IS NOT NULL
+  AND m.send_lease_until < NOW()
+RETURNING
+    m.id,
+    m.uuid,
+    m.status,
+    m.meta,
+    m.sender_id,
+    m.conversation_id,
+    c.uuid AS conversation_uuid
 
 -- name: get-message
 SELECT
@@ -1002,29 +1147,44 @@ SELECT conversation_id
 FROM conversation_messages
 WHERE source_id = ANY($1::text []);
 
--- name: update-message-status
-UPDATE conversation_messages SET status = $1::message_status, updated_at = NOW()
-WHERE uuid = $2 AND NOT ($1 = 'sent' AND status = 'failed');
-
 -- name: mark-message-pending-for-retry
--- Keeping the old wamid or provider_status would let a late webhook re-fail the retried row.
+-- A manual retry starts a brand new send generation: the lease and dispatch
+-- marker are reset and every old owner is detached. Keeping the old wamid or
+-- provider_status would let a late webhook or a zombie owner of the previous
+-- generation overwrite the fresh attempt, so WhatsApp clears what it allows
+-- clearing (source id and provider receipt fields); other channels keep the
+-- local source id as before.
 UPDATE conversation_messages m
 SET status = 'pending',
+    send_generation = m.send_generation + 1,
+    send_owner = NULL,
+    send_lease_until = NULL,
+    send_started_at = NULL,
     source_id = CASE WHEN inb.channel = 'whatsapp' THEN NULL ELSE m.source_id END,
     meta = COALESCE(m.meta, '{}'::jsonb)
              - 'provider_status' - 'provider_status_updated_at' - 'provider_sent_at'
              - 'provider_delivered_at' - 'provider_read_at' - 'provider_failed_at'
-             - 'provider_failure_reason',
+             - 'provider_failure_reason'
+             - 'send_unknown_at' - 'send_unknown_reason',
     updated_at = NOW()
 FROM conversations c
 JOIN inboxes inb ON inb.id = c.inbox_id
-WHERE m.uuid = $1 AND c.id = m.conversation_id AND m.status IN ('failed', 'sent');
+WHERE m.uuid = $1 AND c.id = m.conversation_id AND m.status IN ('failed', 'sent', 'unknown')
+RETURNING m.uuid, c.uuid AS conversation_uuid, m.send_generation;
 
 -- name: update-message-source-id
 UPDATE conversation_messages SET source_id = $1 WHERE id = $2;
 
 -- name: update-message-source-id-by-uuid
-UPDATE conversation_messages SET source_id = $2, updated_at = NOW() WHERE uuid = $1;
+-- Channels persist the provider id (e.g. wamid) mid-dispatch. The write is
+-- generation scoped so a stale owner cannot repoint a newer attempt, but it
+-- is allowed on an 'unknown' row of the same generation: recovering that
+-- provider id is exactly what lets a later channel receipt converge the row.
+UPDATE conversation_messages
+SET source_id = $2, updated_at = NOW()
+WHERE uuid = $1
+  AND send_generation = $3
+  AND status IN ('pending', 'unknown');
 
 -- name: merge-message-meta-by-uuid
 UPDATE conversation_messages m
@@ -1036,29 +1196,61 @@ WHERE m.uuid = $1
 RETURNING m.uuid, c.uuid AS conversation_uuid, m.meta;
 
 -- name: apply-whatsapp-message-status
--- Meta guard is monotonic (rank order) and sticky on failure. The enum status only guards against un-failing a failed message.
+-- Meta guard is monotonic (rank order) and sticky on failure. A receipt is
+-- also the channel-side confirmation that converges a row still owned by a
+-- worker ('pending') or parked as 'unknown' after a dead owner. converged is
+-- true only when this statement itself moved such a row into a terminal
+-- status, so the caller runs the one-shot terminal side effects exactly once.
 WITH ranks(status, rank) AS (
   VALUES ('sent', 1), ('delivered', 2), ('read', 3), ('failed', 4)
+),
+locked AS (
+  SELECT m.uuid,
+         m.status AS old_status,
+         m.conversation_id,
+         c.uuid AS conversation_uuid
+  FROM conversation_messages m
+  JOIN conversations c ON c.id = m.conversation_id
+  WHERE m.source_id = $1
+  FOR UPDATE OF m
+),
+updated AS (
+  UPDATE conversation_messages m
+  SET status = CASE
+        WHEN m.status = 'failed' THEN m.status
+        WHEN $2::message_status = 'failed' THEN 'failed'::message_status
+        WHEN m.status IN ('pending', 'unknown') THEN 'sent'::message_status
+        ELSE m.status
+      END,
+      send_owner = CASE WHEN m.status IN ('pending', 'unknown') THEN NULL ELSE m.send_owner END,
+      send_lease_until = CASE WHEN m.status IN ('pending', 'unknown') THEN NULL ELSE m.send_lease_until END,
+      meta = CASE
+        WHEN COALESCE(m.meta->>'provider_status', '') != 'failed'
+         AND COALESCE(
+               (SELECT rank FROM ranks WHERE status = ($3::jsonb)->>'provider_status'),
+               0
+             ) >= COALESCE(
+               (SELECT rank FROM ranks WHERE status = m.meta->>'provider_status'),
+               0
+             )
+        THEN COALESCE(m.meta, '{}'::jsonb) || $3::jsonb
+        ELSE m.meta
+      END,
+      updated_at = NOW()
+  FROM locked
+  WHERE locked.uuid = m.uuid
+  RETURNING m.uuid,
+            m.status,
+            m.meta,
+            m.sender_id,
+            m.conversation_id,
+            locked.old_status,
+            locked.conversation_uuid,
+            ($2::message_status IN ('sent', 'failed')
+               AND locked.old_status IN ('pending', 'unknown')) AS converged
 )
-UPDATE conversation_messages m
-SET status = CASE WHEN m.status != 'failed' THEN $2::message_status ELSE m.status END,
-    meta = CASE
-      WHEN COALESCE(m.meta->>'provider_status', '') != 'failed'
-       AND COALESCE(
-             (SELECT rank FROM ranks WHERE status = ($3::jsonb)->>'provider_status'),
-             0
-           ) >= COALESCE(
-             (SELECT rank FROM ranks WHERE status = m.meta->>'provider_status'),
-             0
-           )
-      THEN COALESCE(m.meta, '{}'::jsonb) || $3::jsonb
-      ELSE m.meta
-    END,
-    updated_at = NOW()
-FROM conversations c
-WHERE m.source_id = $1
-  AND c.id = m.conversation_id
-RETURNING m.uuid, c.uuid AS conversation_uuid, m.status, m.meta;
+SELECT uuid, status, meta, sender_id, conversation_id, old_status, conversation_uuid, converged
+FROM updated;
 
 -- name: get-whatsapp-read-receipt-target
 SELECT cm.source_id, c.inbox_id

@@ -224,12 +224,26 @@
                   <p class="max-w-xs break-words">{{ sendFailureReason }}</p>
                 </TooltipContent>
               </Tooltip>
-              <RotateCcw
-                size="12"
-                @click="retryMessage(message)"
-                class="cursor-pointer text-muted-foreground hover:text-foreground transition-colors duration-200"
-                v-if="showRetry"
-              />
+              <Tooltip v-if="isUnknown">
+                <TooltipTrigger :aria-label="t('globals.terms.unknown')">
+                  <CircleAlert :size="12" class="text-amber-500" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p class="max-w-xs break-words">{{ t('conversation.message.deliveryUnknown') }}</p>
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip v-if="showRetry">
+                <TooltipTrigger :aria-label="t('globals.terms.retry')">
+                  <RotateCcw
+                    size="12"
+                    @click="retryMessage(message)"
+                    class="cursor-pointer text-muted-foreground hover:text-foreground transition-colors duration-200"
+                  />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{{ t('globals.terms.retry') }}</p>
+                </TooltipContent>
+              </Tooltip>
             </div>
           </template>
         </div>
@@ -463,6 +477,7 @@ const bubbleClasses = computed(() => ({
   'bg-secondary border border-border': isOutgoing.value && !props.message.private,
   'opacity-50 animate-pulse': isOutgoing.value && props.message.status === 'pending',
   'border-destructive': isOutgoing.value && props.message.status === 'failed',
+  'border-amber-500': isOutgoing.value && props.message.status === 'unknown',
   relative: isOutgoing.value,
   'show-quoted-text': !isOutgoing.value && showQuotedText.value,
   'hide-quoted-text': !isOutgoing.value && !showQuotedText.value
@@ -484,7 +499,13 @@ const deliveryStatusLabel = computed(() => {
   if (deliveryStatus.value === 'delivered') return t('globals.terms.delivered')
   return t('globals.terms.sent')
 })
-const showRetry = computed(() => isOutgoing.value && props.message.status === 'failed' && props.message.sender_id === userStore.userID)
+const isUnknown = computed(() => isOutgoing.value && props.message.status === 'unknown')
+const showRetry = computed(
+  () =>
+    isOutgoing.value &&
+    ['failed', 'unknown'].includes(props.message.status) &&
+    props.message.sender_id === userStore.userID
+)
 
 const sendFailureReason = computed(() =>
   props.message.status === 'failed' ? props.message.meta?.provider_failure_reason : null

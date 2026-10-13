@@ -389,13 +389,17 @@ type queries struct {
 	GetMessages                        string     `query:"get-messages"`
 	GetContactUnreadPreviewMessages    *sqlx.Stmt `query:"get-contact-unread-preview-messages"`
 	GetOutgoingPendingMessages         *sqlx.Stmt `query:"get-outgoing-pending-messages"`
+	ClaimOutgoingMessage               *sqlx.Stmt `query:"claim-outgoing-message"`
+	RenewOutgoingMessageLease          *sqlx.Stmt `query:"renew-outgoing-message-lease"`
+	MarkOutgoingDispatchStarted        *sqlx.Stmt `query:"mark-outgoing-dispatch-started"`
+	CommitOutgoingTerminal             *sqlx.Stmt `query:"commit-outgoing-terminal"`
+	RecoverInterruptedDispatches       *sqlx.Stmt `query:"recover-interrupted-dispatches"`
 	GetMessageSourceIDs                *sqlx.Stmt `query:"get-message-source-ids"`
 	GetEmailSenderMessage              *sqlx.Stmt `query:"get-email-sender-message"`
 	GetConversationUUIDFromMessageUUID *sqlx.Stmt `query:"get-conversation-uuid-from-message-uuid"`
 	MessageExistsBySourceID            *sqlx.Stmt `query:"message-exists-by-source-id"`
 	GetConversationByMessageID         *sqlx.Stmt `query:"get-conversation-by-message-id"`
 	InsertMessage                      *sqlx.Stmt `query:"insert-message"`
-	UpdateMessageStatus                *sqlx.Stmt `query:"update-message-status"`
 	MarkMessagePendingForRetry         *sqlx.Stmt `query:"mark-message-pending-for-retry"`
 	ClearMessageHandoffFormPending     *sqlx.Stmt `query:"clear-message-handoff-form-pending"`
 	UpdateMessageSourceID              *sqlx.Stmt `query:"update-message-source-id"`

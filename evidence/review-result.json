@@ -1,0 +1,49 @@
+{
+  "id": "abhinavxd-libredesk-f2fdc09e-dff1-4ea3-b7b2-885cdcf14e71",
+  "expectedSyncRevision": 8,
+  "rounds": 136,
+  "harness": "Trae",
+  "completionStatus": "部分完成",
+  "collectionDecision": "收录：长程题",
+  "reality": "客服回复跨邮件、在线聊天和 WhatsApp 共用数据库 pending 队列与后台发送器，外部渠道接受消息和本地状态落库之间存在不可回滚的边界。要避免横向实例、进程重启和人工重试共同造成重复发送或错误终态，必须让数据库认领、会话顺序、渠道返回证据、重试代际和下游广播协同，而不能只在当前进程加锁或包一层重试。",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 2,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 3,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 4,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 5,
+      "passed": false,
+      "reason": "终态数据库提交早于全部下游副作用，副作用读取或写入失败后只记录日志，恢复扫描不会重新处理已经终态的消息"
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "runResult": "1 通过\n2 通过\n3 通过\n4 通过\n5 未通过 终态数据库提交早于全部下游副作用，副作用读取或写入失败后只记录日志，恢复扫描不会重新处理已经终态的消息\n6 通过\n7 通过",
+  "artifactResult": "1 通过\n2 通过\n3 通过\n4 通过\n5 未通过 终态数据库提交早于全部下游副作用，副作用读取或写入失败后只记录日志，恢复扫描不会重新处理已经终态的消息\n6 通过\n7 通过",
+  "artifactMaterials": "同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。internal/conversation、WhatsApp channel 与迁移无缓存测试通过，关键发送认领与代际测试连续 12 次通过；代码审计确认终态先提交，后续 webhook、回复时间、SLA 和自动化失败只记录日志且没有持久重试。"
+}

@@ -97,9 +97,29 @@ type SendMeta struct {
 	TemplateButtons       []whatsapp.TemplateButton `json:"template_buttons,omitempty"`
 }
 
-// SourceIDUpdater persists the Meta message ID for status correlation.
+// ErrDeliveryUncertain means the send attempt may already have been accepted
+// by Meta (the last attempt hit a transport failure or exhausted 429/5xx
+// retries). The caller must park the message as unknown instead of resending.
+var ErrDeliveryUncertain = errors.New("whatsapp delivery status is uncertain")
+
+// errMessageRejected marks a definitive, non-ambiguous rejection that never
+// resulted (and never can result) in an accepted message: local validation or
+// a definitive 4xx from Meta.
+var errMessageRejected = errors.New("whatsapp rejected the message")
+
+// reject wraps err as a definitive rejection.
+func reject(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", errMessageRejected, err)
+}
+
+// SourceIDUpdater persists the Meta message ID for status correlation. The
+// generation ties the write to the dispatch attempt, so a late callback from
+// a superseded generation cannot repoint the new send.
 type SourceIDUpdater interface {
-	UpdateMessageSourceID(messageUUID, sourceID string) error
+	UpdateMessageSourceID(messageUUID, sourceID string, generation int64) error
 }
 
 type WhatsApp struct {
@@ -156,17 +176,29 @@ func (w *WhatsApp) Close() error             { return nil }
 // Receive is a no-op. Inbound messages arrive via the webhook handler.
 func (w *WhatsApp) Receive(ctx context.Context) error { return nil }
 
-// Retries a 429 or 5xx only, since a send carries no idempotency key and Meta may already have accepted it.
+// Send retries a 429 or 5xx only, since a send carries no idempotency key and
+// Meta may already have accepted it. The returned error is either nil, wrapped
+// with errMessageRejected (the message definitely was not accepted) or wrapped
+// with ErrDeliveryUncertain (Meta may have accepted it; never resend blindly).
 func (w *WhatsApp) Send(message models.OutboundMessage) error {
 	var err error
 	for attempt := 1; ; attempt++ {
 		err = w.send(message)
 		if err == nil || attempt >= sendMaxAttempts || !metaRefusedSend(err) {
-			return err
+			break
 		}
 		w.lo.Warn("meta refused the whatsapp send, retrying", "message_uuid", message.UUID, "attempt", attempt, "error", err)
 		time.Sleep(w.retryBackoff * time.Duration(attempt))
 	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errMessageRejected) {
+		return err
+	}
+	// Exhausted 429/5xx retries or a transport-level failure: the final
+	// attempt may have reached and been accepted by Meta.
+	return fmt.Errorf("%w: %v", ErrDeliveryUncertain, err)
 }
 
 func metaRefusedSend(err error) bool {
@@ -177,13 +209,26 @@ func metaRefusedSend(err error) bool {
 	return me.StatusCode == http.StatusTooManyRequests || me.StatusCode >= http.StatusInternalServerError
 }
 
+// metaDefinitiveRejection reports a parsed Meta response that rules out
+// delivery (any non-retryable 4xx). 408/429/5xx stay ambiguous.
+func metaDefinitiveRejection(err error) bool {
+	var me *whatsapp.MetaAPIError
+	if !errors.As(err, &me) {
+		return false
+	}
+	return me.StatusCode > 0 &&
+		me.StatusCode != http.StatusRequestTimeout &&
+		me.StatusCode != http.StatusTooManyRequests &&
+		me.StatusCode < http.StatusInternalServerError
+}
+
 func (w *WhatsApp) send(message models.OutboundMessage) error {
 	meta, err := parseSendMeta(message.Meta)
 	if err != nil {
-		return fmt.Errorf("parsing whatsapp send meta: %w", err)
+		return reject(fmt.Errorf("parsing whatsapp send meta: %w", err))
 	}
 	if meta.ToPhone == "" {
-		return fmt.Errorf("missing recipient phone number on outbound message")
+		return reject(fmt.Errorf("missing recipient phone number on outbound message"))
 	}
 
 	timeout := MetaCallTimeout
@@ -214,24 +259,30 @@ func (w *WhatsApp) send(message models.OutboundMessage) error {
 		sourceID, err = w.client.SendText(ctx, acc, meta.ToPhone, textBody(message), meta.ReplyToWAMessageID)
 
 	default:
-		return fmt.Errorf("outbound message has no content")
+		return reject(fmt.Errorf("outbound message has no content"))
+	}
+	if err != nil {
+		if metaDefinitiveRejection(err) {
+			return reject(err)
+		}
+		return err
 	}
 
 	if sourceID != "" && w.sourceUpdater != nil {
-		if upErr := w.sourceUpdater.UpdateMessageSourceID(message.UUID, sourceID); upErr != nil {
-			w.lo.Error("failed to persist whatsapp source id", "message_uuid", message.UUID, "source_id", sourceID, "error", upErr)
+		if upErr := w.sourceUpdater.UpdateMessageSourceID(message.UUID, sourceID, message.SendGeneration); upErr != nil {
+			w.lo.Error("failed to persist whatsapp source id", "message_uuid", message.UUID, "source_id", sourceID, "generation", message.SendGeneration, "error", upErr)
 		}
 	}
-	return err
+	return nil
 }
 
 // sendAttachment uploads and sends one attachment. Meta accepts only one media per message.
 func (w *WhatsApp) sendAttachment(ctx context.Context, acc whatsapp.Account, meta SendMeta, message models.OutboundMessage) (string, error) {
 	if len(message.Attachments) > 1 {
-		return "", fmt.Errorf("whatsapp accepts one attachment per message, got %d", len(message.Attachments))
+		return "", reject(fmt.Errorf("whatsapp accepts one attachment per message, got %d", len(message.Attachments)))
 	}
 	if bad := rejectedAttachments(message.Attachments); len(bad) > 0 {
-		return "", fmt.Errorf("WhatsApp can't send these files: %s", strings.Join(bad, ", "))
+		return "", reject(fmt.Errorf("WhatsApp can't send these files: %s", strings.Join(bad, ", ")))
 	}
 
 	att := message.Attachments[0]

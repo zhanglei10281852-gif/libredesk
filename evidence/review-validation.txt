@@ -1,0 +1,5 @@
+题目：让每条客服回复拥有可恢复的持久发送代际
+Session：573311172224344:3c7769aab8aed9f310d4975380bada9a_6ace030068b0b256957830ca.6ace030168b0b256957830cd.6ace030068b0b256957830cb:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/13 18:08:01)
+有效轮数：136｜Harness：Trae｜证据来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：部分完成｜收录：长程题
+同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。internal/conversation、WhatsApp channel 与迁移无缓存测试通过，关键发送认领与代际测试连续 12 次通过；代码审计确认终态先提交，后续 webhook、回复时间、SLA 和自动化失败只记录日志且没有持久重试。

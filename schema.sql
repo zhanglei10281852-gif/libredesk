@@ -3,7 +3,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 DROP TYPE IF EXISTS "channels" CASCADE; CREATE TYPE "channels" AS ENUM ('email', 'livechat', 'whatsapp');
 DROP TYPE IF EXISTS "message_type" CASCADE; CREATE TYPE "message_type" AS ENUM ('incoming','outgoing','activity');
 DROP TYPE IF EXISTS "message_sender_type" CASCADE; CREATE TYPE "message_sender_type" AS ENUM ('agent','contact');
-DROP TYPE IF EXISTS "message_status" CASCADE; CREATE TYPE "message_status" AS ENUM ('received','sent','failed','pending');
+DROP TYPE IF EXISTS "message_status" CASCADE; CREATE TYPE "message_status" AS ENUM ('received','sent','failed','pending','unknown');
 DROP TYPE IF EXISTS "content_type" CASCADE; CREATE TYPE "content_type" AS ENUM ('text','html');
 DROP TYPE IF EXISTS "conversation_assignment_type" CASCADE; CREATE TYPE "conversation_assignment_type" AS ENUM ('Round robin','Manual');
 DROP TYPE IF EXISTS "template_type" CASCADE; CREATE TYPE "template_type" AS ENUM ('email_outgoing', 'email_notification');
@@ -336,7 +336,11 @@ CREATE TABLE conversation_messages (
     source_id TEXT NULL,
  	sender_id BIGINT REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE NOT NULL,
     sender_type message_sender_type NOT NULL,
-    meta JSONB DEFAULT '{}'::JSONB NULL
+    meta JSONB DEFAULT '{}'::JSONB NULL,
+    send_generation BIGINT DEFAULT 1 NOT NULL,
+    send_owner TEXT NULL,
+    send_lease_until TIMESTAMPTZ NULL,
+    send_started_at TIMESTAMPTZ NULL
 );
 CREATE INDEX index_trgm_conversation_messages_on_text_content ON conversation_messages USING GIN (text_content gin_trgm_ops);
 CREATE INDEX index_conversation_messages_on_conversation_id ON conversation_messages (conversation_id);
@@ -344,6 +348,8 @@ CREATE INDEX index_conversation_messages_on_created_at ON conversation_messages 
 CREATE INDEX index_conversation_messages_on_source_id ON conversation_messages (source_id);
 CREATE INDEX index_conversation_messages_on_status ON conversation_messages (status);
 CREATE INDEX index_conversation_messages_on_conversation_id_and_created_at ON conversation_messages (conversation_id, created_at);
+CREATE INDEX index_conversation_messages_on_outgoing_head ON conversation_messages (conversation_id, id) WHERE type = 'outgoing' AND private = false AND status IN ('pending', 'unknown');
+CREATE INDEX index_conversation_messages_on_dispatch_lease ON conversation_messages (send_lease_until) WHERE send_started_at IS NOT NULL;
 
 DROP TABLE IF EXISTS automation_rules CASCADE;
 CREATE TABLE automation_rules (

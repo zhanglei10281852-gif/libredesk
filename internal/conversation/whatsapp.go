@@ -21,7 +21,6 @@ import (
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	"github.com/abhinavxd/libredesk/internal/whatsapp"
 	wtmodels "github.com/abhinavxd/libredesk/internal/whatsapp/template/models"
-	"github.com/jmoiron/sqlx"
 )
 
 // WhatsAppWindowDuration is Meta's customer service window for free-form messages.
@@ -97,11 +96,12 @@ func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.
 		dbStatus = models.MessageStatusFailed
 	}
 
+	// receiptRow additionally reports the previous status and whether this
+	// receipt itself converged an in-flight or unknown row into a terminal.
 	var row struct {
-		UUID             string          `db:"uuid"`
-		ConversationUUID string          `db:"conversation_uuid"`
-		Status           string          `db:"status"`
-		Meta             json.RawMessage `db:"meta"`
+		terminalMessageRow
+		OldStatus string `db:"old_status"`
+		Converged bool   `db:"converged"`
 	}
 	if err := m.q.ApplyWhatsAppMessageStatus.Get(&row, sourceID, dbStatus, patchBytes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -110,41 +110,18 @@ func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.
 		m.lo.Error("error applying whatsapp message status", "source_id", sourceID, "error", err)
 		return err
 	}
-	m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": row.Status, "meta": stripCSATUUID(row.Meta)})
-	return nil
-}
 
-func (m *Manager) RecordWhatsAppSendFailure(messageUUID, errorMsg string) error {
-	if messageUUID == "" || errorMsg == "" {
-		return nil
+	if row.Converged {
+		// This receipt is the first valid terminal state for the generation:
+		// broadcast, message_updated webhook and the outgoing reply side
+		// effects must fire exactly once here, because the dispatching owner
+		// (or the dead owner that left the row unknown) can no longer commit.
+		m.afterTerminal(row.terminalMessageRow, patchBytes)
+	} else {
+		// Ordinary lifecycle update of an already finalized message
+		// (sent -> delivered/read or a replayed receipt): meta-only, as before.
+		m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": row.Status, "meta": stripCSATUUID(row.Meta)})
 	}
-	patch := map[string]any{
-		"provider_status":         WhatsAppStatusFailed,
-		"provider_failed_at":      time.Now().UTC().Format(time.RFC3339),
-		"provider_failure_reason": errorMsg,
-	}
-	return m.mergeWhatsAppMeta(m.q.MergeMessageMetaByUUID, messageUUID, patch)
-}
-
-// mergeWhatsAppMeta is a no-op on an unmatched key.
-func (m *Manager) mergeWhatsAppMeta(stmt *sqlx.Stmt, key string, patch map[string]any) error {
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		return err
-	}
-	var row struct {
-		UUID             string          `db:"uuid"`
-		ConversationUUID string          `db:"conversation_uuid"`
-		Meta             json.RawMessage `db:"meta"`
-	}
-	if err := stmt.Get(&row, key, patchBytes); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		m.lo.Error("error merging whatsapp meta", "key", key, "error", err)
-		return err
-	}
-	m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"meta": stripCSATUUID(row.Meta)})
 	return nil
 }
 

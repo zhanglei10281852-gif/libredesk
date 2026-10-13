@@ -167,13 +167,15 @@ func handleRetryMessage(r *fastglue.Request) error {
 		return sendErrorEnvelope(r, err)
 	}
 
-	// Only outgoing agent messages that have failed can be retried.
+	// Outgoing agent messages that have failed, or whose channel result is
+	// unknown after an interrupted dispatch, can be retried. A retry always
+	// starts a fresh send generation.
 	msg, err := app.conversation.GetMessage(uuid)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
 
-	if msg.SenderType != cmodels.SenderTypeAgent || msg.Status != cmodels.MessageStatusFailed || msg.SenderID != user.ID || msg.ConversationUUID != cuuid {
+	if msg.SenderType != cmodels.SenderTypeAgent || (msg.Status != cmodels.MessageStatusFailed && msg.Status != cmodels.MessageStatusUnknown) || msg.SenderID != user.ID || msg.ConversationUUID != cuuid {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, app.i18n.T("globals.messages.badRequest"), nil, envelope.InputError)
 	}
 

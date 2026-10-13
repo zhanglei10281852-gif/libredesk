@@ -538,15 +538,16 @@ func decodeBody(t *testing.T, r *http.Request, out any) {
 }
 
 type fakeSourceUpdater struct {
-	uuid     string
-	sourceID string
-	calls    int
-	err      error
+	uuid       string
+	sourceID   string
+	generation int64
+	calls      int
+	err        error
 }
 
-func (f *fakeSourceUpdater) UpdateMessageSourceID(messageUUID, sourceID string) error {
+func (f *fakeSourceUpdater) UpdateMessageSourceID(messageUUID, sourceID string, generation int64) error {
 	f.calls++
-	f.uuid, f.sourceID = messageUUID, sourceID
+	f.uuid, f.sourceID, f.generation = messageUUID, sourceID, generation
 	return f.err
 }
 
@@ -567,6 +568,58 @@ func TestSendRetriesWhenMetaRefuses(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&attempts); got != 3 {
 		t.Fatalf("expected three attempts, got %d", got)
+	}
+}
+
+// An exhausted 429/5xx leaves doubt about acceptance: the error must be
+// flagged uncertain (never blindly resent), while a definitive 4xx is a
+// rejection.
+func TestSendClassifiesUncertainAndRejected(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		uncertain  bool
+	}{
+		{"exhausted 429", http.StatusTooManyRequests, true},
+		{"exhausted 500", http.StatusInternalServerError, true},
+		{"definitive 400", http.StatusBadRequest, false},
+		{"definitive 403", http.StatusForbidden, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				w.Write([]byte(`{"error":{"message":"x","code":1}}`))
+			}, nil)
+			inb.retryBackoff = time.Millisecond
+			err := inb.Send(textMessage("hello"))
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if errors.Is(err, ErrDeliveryUncertain) != tc.uncertain {
+				t.Fatalf("uncertain=%v want %v (err=%v)", errors.Is(err, ErrDeliveryUncertain), tc.uncertain, err)
+			}
+			if !tc.uncertain && !errors.Is(err, errMessageRejected) {
+				t.Fatalf("expected a definitive rejection, got %v", err)
+			}
+		})
+	}
+}
+
+// The generation rides along on the source id callback so stale owners can't
+// repoint a newer send attempt.
+func TestSendSourceIDCallbackCarriesGeneration(t *testing.T) {
+	updater := &fakeSourceUpdater{}
+	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSendResponse(w, "wamid.GEN")
+	}, updater)
+	msg := textMessage("hi")
+	msg.SendGeneration = 7
+	if err := inb.Send(msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if updater.generation != 7 || updater.sourceID != "wamid.GEN" {
+		t.Fatalf("unexpected callback: %+v", updater)
 	}
 }
 

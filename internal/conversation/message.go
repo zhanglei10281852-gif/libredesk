@@ -58,6 +58,9 @@ type fromNameInbox struct{ Name string }
 func (m *Manager) Run(ctx context.Context, incomingQWorkers, outgoingQWorkers, scanInterval time.Duration) {
 	dbScanner := time.NewTicker(scanInterval)
 	defer dbScanner.Stop()
+	// The recovery scan only reacts to dead leases and can run far less often.
+	recoveryScanner := time.NewTicker(outgoingRecoveryScanInterval)
+	defer recoveryScanner.Stop()
 
 	for range outgoingQWorkers {
 		m.wg.Add(1)
@@ -92,6 +95,8 @@ func (m *Manager) Run(ctx context.Context, incomingQWorkers, outgoingQWorkers, s
 				m.outgoingProcessingMessages.Store(message.ID, message.ConversationID)
 				m.outgoingMessageQueue <- message
 			}
+		case <-recoveryScanner.C:
+			m.recoverInterruptedDispatches()
 		}
 	}
 }
@@ -139,35 +144,58 @@ func (m *Manager) MessageSenderWorker(ctx context.Context) {
 	}
 }
 
-// sendOutgoingMessage sends an outgoing message.
-func (m *Manager) sendOutgoingMessage(message models.Message) {
-	defer m.outgoingProcessingMessages.Delete(message.ID)
+// sendOutgoingMessage claims exclusive, expiring ownership of the peeked
+// message generation and only then calls the channel. Ownership and the
+// generation gate every terminal write, so duplicate workers, crashes around
+// the channel call and manual retries can never produce two effective sends
+// or duplicate terminal side effects.
+func (m *Manager) sendOutgoingMessage(peeked models.Message) {
+	defer m.outgoingProcessingMessages.Delete(peeked.ID)
 
-	// Helper function to handle errors
-	handleError := func(err error, errorMsg string) bool {
-		if err != nil {
-			m.lo.Error(errorMsg, "error", err, "message_id", message.ID)
-			m.UpdateMessageStatus(message.UUID, models.MessageStatusFailed)
-			return true
+	// Atomically take over the generation. Losing the race to another owner,
+	// or finding the row no longer the pending head, is a quiet no-op.
+	var message models.Message
+	owner := newLeaseOwner()
+	if err := m.q.ClaimOutgoingMessage.Get(&message, peeked.ID, owner, outgoingLeaseInterval); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			m.lo.Error("error claiming outgoing message", "message_id", peeked.ID, "error", err)
 		}
-		return false
+		return
+	}
+
+	// Keep the lease alive for as long as preparation and the channel call
+	// take. Once renewal fails the lease was lost; the terminal commit below
+	// then becomes a no-op and no side effects escape.
+	stopHeartbeat := m.startLeaseHeartbeat(message.UUID, message.SendGeneration, owner)
+	defer stopHeartbeat()
+
+	// Fail the message without calling the channel: local preparation errors
+	// are definitive and never reach the provider, so the failure flow is
+	// unchanged and an expired owner's failure simply fails to commit.
+	failBeforeDispatch := func(err error, errorMsg string) {
+		if err == nil {
+			return
+		}
+		m.lo.Error(errorMsg, "error", err, "message_id", message.ID)
+		m.commitTerminal(message, owner, models.MessageStatusFailed, "", nil)
 	}
 
 	// Get inbox
 	inb, err := m.inboxStore.Get(message.InboxID)
-	if handleError(err, "error fetching inbox") {
+	if err != nil {
+		failBeforeDispatch(err, "error fetching inbox")
 		return
 	}
 
 	// Render content in template
 	if err := m.RenderMessageInTemplate(inb.Channel(), &message); err != nil {
-		handleError(err, "error rendering content in template")
+		failBeforeDispatch(err, "error rendering content in template")
 		return
 	}
 
 	// Attach attachments to the message
 	if err := m.attachAttachmentsToMessage(&message); err != nil {
-		handleError(err, "error attaching attachments to message")
+		failBeforeDispatch(err, "error attaching attachments to message")
 		return
 	}
 
@@ -176,7 +204,8 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 
 	if inb.Channel() == inbox.ChannelEmail {
 		inboxRecord, err := m.inboxStore.GetDBRecord(message.InboxID)
-		if handleError(err, "error fetching inbox sender addresses") {
+		if err != nil {
+			failBeforeDispatch(err, "error fetching inbox sender addresses")
 			return
 		}
 		selected := message.SendFrom()
@@ -184,7 +213,8 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 			selected = inboxRecord.From
 		}
 		selected, err = m.resolveSendFrom(message.ConversationUUID, inboxRecord, selected)
-		if handleError(err, "invalid email sender") {
+		if err != nil {
+			failBeforeDispatch(err, "invalid email sender")
 			return
 		}
 		outbound.From = m.emailFromAddress(inb, message, selected)
@@ -196,60 +226,40 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 		outbound.References, outbound.InReplyTo = m.BuildEmailThreadingHeaders(message.ConversationID, outbound.SourceID)
 	}
 
-	// Send message
-	err = inb.Send(outbound)
-	if err != nil && err != livechat.ErrClientNotConnected {
-		if inb.Channel() == inbox.ChannelWhatsApp {
-			m.RecordWhatsAppSendFailure(message.UUID, err.Error())
-		}
-		handleError(err, "error sending message")
-		return
-	}
-
-	// Update status as sent.
-	m.UpdateMessageStatus(message.UUID, models.MessageStatusSent)
-
-	// Skip system user replies since we only update timestamps and SLA for human replies.
-	systemUser, err := m.userStore.GetSystemUser()
+	// From this point on the channel may accept the message. A dead process
+	// after this stamp can no longer be safely resent; recovery parks the row
+	// as unknown instead.
+	res, err := m.q.MarkOutgoingDispatchStarted.Exec(message.UUID, message.SendGeneration, owner, outgoingLeaseInterval)
 	if err != nil {
-		m.lo.Error("error fetching system user", "error", err)
+		m.lo.Error("error marking dispatch as started", "message_id", message.ID, "error", err)
 		return
 	}
-	if message.SenderID != systemUser.ID {
-		conversation, err := m.GetConversation(message.ConversationID, "", "")
-		if err != nil {
-			m.lo.Error("error fetching conversation", "conversation_id", message.ConversationID, "error", err)
-			return
+	if n, _ := res.RowsAffected(); n == 0 {
+		m.lo.Info("lost outgoing lease before channel call, skipping", "message_id", message.ID)
+		return
+	}
+
+	// Send message.
+	err = inb.Send(outbound)
+	switch {
+	case err == nil || errors.Is(err, livechat.ErrClientNotConnected):
+		// Live chat marks "sent" while the visitor is offline too; the stored
+		// message reaches them from history on reconnect. Preserve that.
+		m.commitTerminal(message, owner, models.MessageStatusSent, "", nil)
+	case isDeliveryUncertain(inb.Channel(), err):
+		// The provider may already have accepted this. Never resend blindly;
+		// park it as unknown and let a receipt or a human recover it.
+		m.lo.Warn("outgoing channel result uncertain, parking message as unknown",
+			"message_id", message.ID, "channel", inb.Channel(), "error", err)
+		m.commitTerminal(message, owner, models.MessageStatusUnknown, "", unknownMetaPatch(err))
+	default:
+		// Explicit rejection: the existing failure flow.
+		m.lo.Error("error sending message", "error", err, "message_id", message.ID)
+		patch := json.RawMessage(nil)
+		if inb.Channel() == inbox.ChannelWhatsApp {
+			patch = whatsAppFailureMetaPatch(err.Error())
 		}
-
-		now := time.Now()
-		nowStr := now.Format(time.RFC3339)
-		wsData := map[string]any{"last_reply_at": nowStr, "waiting_since": nil}
-
-		var isFirstReply bool
-		if err := m.q.UpdateConversationReplyTimestamps.QueryRow(message.ConversationID, now).Scan(&isFirstReply); err != nil {
-			m.lo.Error("error updating conversation reply timestamps", "error", err)
-		} else if isFirstReply {
-			wsData["first_reply_at"] = nowStr
-			// Stamp the first-response SLA immediately.
-			if err := m.slaStore.EvaluateConversationSLA(message.ConversationID); err != nil {
-				m.lo.Error("error evaluating SLA after first reply", "conversation_id", message.ConversationID, "error", err)
-			}
-		}
-
-		// Mark latest SLA event for next response metric as met.
-		metAt, err := m.slaStore.SetLatestSLAEventMetAt(conversation.AppliedSLAID.Int, sla.MetricNextResponse)
-		if err != nil && !errors.Is(err, sla.ErrLatestSLAEventNotFound) {
-			m.lo.Error("error setting next response SLA event `met_at`", "conversation_id", conversation.ID, "metric", sla.MetricNextResponse, "applied_sla_id", conversation.AppliedSLAID.Int, "error", err)
-		} else if !metAt.IsZero() {
-			wsData["next_response_met_at"] = metAt.Format(time.RFC3339)
-		}
-
-		m.BroadcastConversationUpdate(message.ConversationUUID, wsData)
-
-		if message.ShouldEvaluateAutomation(systemUser.ID) {
-			m.automation.EvaluateConversationUpdateRulesByID(message.ConversationID, "", amodels.EventConversationMessageOutgoing, umodels.User{ID: message.SenderID})
-		}
+		m.commitTerminal(message, owner, models.MessageStatusFailed, "", patch)
 	}
 }
 
@@ -442,38 +452,16 @@ func (m *Manager) SignAttachmentURLs(attachments attachment.Attachments) {
 	}
 }
 
-// UpdateMessageStatus updates the status of a message.
-func (m *Manager) UpdateMessageStatus(messageUUID string, status string) error {
-	res, err := m.q.UpdateMessageStatus.Exec(status, messageUUID)
-	if err != nil {
-		m.lo.Error("error updating message status", "message_uuid", messageUUID, "error", err)
-		return err
-	}
-	// The sent-onto-failed guard can make this a no-op. A status that wasn't applied must not be broadcast.
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil
-	}
-
-	// Broadcast message status update to all conversation subscribers.
-	conversationUUID, _ := m.getConversationUUIDFromMessageUUID(messageUUID)
-	m.BroadcastMessageUpdate(conversationUUID, messageUUID, map[string]any{"status": status})
-
-	// Trigger webhook for message update.
-	if message, err := m.GetMessage(messageUUID); err != nil {
-		m.lo.Error("error fetching message for webhook event", "uuid", messageUUID, "error", err)
-	} else {
-		m.webhookStore.TriggerEvent(wmodels.EventMessageUpdated, message)
-	}
-
-	return nil
-}
-
-func (m *Manager) UpdateMessageSourceID(messageUUID, sourceID string) error {
+// UpdateMessageSourceID persists the provider message id (e.g. a wamid)
+// reported by a channel mid-dispatch. It is scoped to the generation
+// performing the dispatch: a zombie owner or a late callback from before a
+// manual retry can never repoint the current generation.
+func (m *Manager) UpdateMessageSourceID(messageUUID, sourceID string, generation int64) error {
 	if messageUUID == "" || sourceID == "" {
 		return nil
 	}
-	if _, err := m.q.UpdateMessageSourceIDByUUID.Exec(messageUUID, sourceID); err != nil {
-		m.lo.Error("error updating message source id", "message_uuid", messageUUID, "error", err)
+	if _, err := m.q.UpdateMessageSourceIDByUUID.Exec(messageUUID, sourceID, generation); err != nil {
+		m.lo.Error("error updating message source id", "message_uuid", messageUUID, "generation", generation, "error", err)
 		return err
 	}
 	return nil
@@ -543,13 +531,22 @@ func (m *Manager) GetReopenableConversationForContact(contactID, inboxID, window
 	return row.ID, row.UUID, nil
 }
 
+// MarkMessageAsPending starts a new send generation for a manual retry: the
+// previous generation's lease, dispatch marker and (for channels that allow
+// it) receipt state are cleared in the same statement, so an expired owner or
+// a late old-generation receipt cannot touch the fresh attempt.
 func (m *Manager) MarkMessageAsPending(uuid string) error {
-	if _, err := m.q.MarkMessagePendingForRetry.Exec(uuid); err != nil {
-		m.lo.Error("error marking message as pending", "uuid", uuid, "error", err)
+	var row struct {
+		UUID             string `db:"uuid"`
+		ConversationUUID string `db:"conversation_uuid"`
+		SendGeneration   int64  `db:"send_generation"`
+	}
+	if err := m.q.MarkMessagePendingForRetry.Get(&row, uuid); err != nil {
+		m.lo.Error("error marking message as pending for retry", "uuid", uuid, "error", err)
 		return envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.errorSendingMessage"), nil)
 	}
-	conversationUUID, _ := m.getConversationUUIDFromMessageUUID(uuid)
-	m.BroadcastMessageUpdate(conversationUUID, uuid, map[string]any{"status": models.MessageStatusPending})
+	m.lo.Info("message queued for retry under new send generation", "uuid", uuid, "send_generation", row.SendGeneration)
+	m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": models.MessageStatusPending})
 	return nil
 }
 
