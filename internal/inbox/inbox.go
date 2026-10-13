@@ -114,6 +114,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	queries       queries
 	inboxes       map[int]Inbox
+	runtimeGen    map[int]int64 // committed generation of the unique active runtime
 	lo            *logf.Logger
 	i18n          *i18n.I18n
 	receivers     map[int]receiverState
@@ -122,6 +123,11 @@ type Manager struct {
 	wg            sync.WaitGroup
 	encryptionKey string
 	db            *sqlx.DB
+
+	// switchLocks serializes every runtime-affecting operation per inbox so
+	// generations of one inbox can never commit or hand over out of order.
+	switchLocksMu sync.Mutex
+	switchLocks   map[int]*sync.Mutex
 }
 
 // Prepared queries.
@@ -131,6 +137,7 @@ type queries struct {
 	GetActive              *sqlx.Stmt `query:"get-active-inboxes"`
 	GetAll                 *sqlx.Stmt `query:"get-all-inboxes"`
 	Update                 *sqlx.Stmt `query:"update"`
+	BumpGeneration         *sqlx.Stmt `query:"bump-runtime-generation"`
 	Toggle                 *sqlx.Stmt `query:"toggle"`
 	SoftDelete             *sqlx.Stmt `query:"soft-delete"`
 	InsertInbox            *sqlx.Stmt `query:"insert-inbox"`
@@ -158,13 +165,30 @@ func New(lo *logf.Logger, db *sqlx.DB, i18n *i18n.I18n, encryptionKey string) (*
 	m := &Manager{
 		lo:            lo,
 		inboxes:       make(map[int]Inbox),
+		runtimeGen:    make(map[int]int64),
 		receivers:     make(map[int]receiverState),
+		switchLocks:   make(map[int]*sync.Mutex),
 		queries:       q,
 		i18n:          i18n,
 		encryptionKey: encryptionKey,
 		db:            db,
 	}
 	return m, nil
+}
+
+// lockInbox serializes runtime-affecting operations (update, enable, disable,
+// delete, reload) for a single inbox. Different inboxes stay independent. The
+// returned function releases the lock.
+func (m *Manager) lockInbox(id int) func() {
+	m.switchLocksMu.Lock()
+	l, ok := m.switchLocks[id]
+	if !ok {
+		l = &sync.Mutex{}
+		m.switchLocks[id] = l
+	}
+	m.switchLocksMu.Unlock()
+	l.Lock()
+	return l.Unlock
 }
 
 // SetMessageStore sets the message store for the manager.
@@ -352,42 +376,176 @@ func (m *Manager) InitInboxes(initFn initFn) error {
 			continue
 		}
 		m.inboxes[inbox.Identifier()] = inbox
+		// Resume tracking the generation persisted in the DB so the first
+		// update after a restart can only publish a strictly newer generation.
+		m.runtimeGen[inbox.Identifier()] = inboxRecord.RuntimeGeneration
 	}
 	return nil
 }
 
-// ReloadInbox reloads a single inbox by ID. It stops the old receiver,
-// fetches the current state from DB, and re-initializes if active.
-func (m *Manager) ReloadInbox(ctx context.Context, id int, initFn initFn) error {
-	// Stop old receiver and close old inbox.
-	m.stopInbox(id)
+// StartInbox constructs and starts the runtime for a freshly created inbox.
+// Operations for the inbox are serialized; only one receiver is ever started.
+func (m *Manager) StartInbox(ctx context.Context, id int, initFn initFn) error {
+	defer m.lockInbox(id)()
+	return m.activateRecord(ctx, id, initFn)
+}
 
-	// Fetch current inbox state from DB.
+// ReloadInbox rebuilds the runtime of a single inbox from the persisted record
+// (OAuth reconnect, externally applied config changes). The candidate is built
+// while the old runtime keeps serving and takes over at a single handoff point;
+// a disabled or deleted record stops the runtime instead. Serialized per inbox.
+func (m *Manager) ReloadInbox(ctx context.Context, id int, initFn initFn) error {
+	defer m.lockInbox(id)()
+	return m.activateRecord(ctx, id, initFn)
+}
+
+// activateRecord loads the persisted record and activates or stops the runtime.
+// Caller must hold the inbox's switch lock.
+func (m *Manager) activateRecord(ctx context.Context, id int, initFn initFn) error {
 	record, err := m.GetDBRecord(id)
 	if err != nil {
-		// Not found (e.g. deleted) - already removed above.
+		// The record is gone (deleted): make sure no runtime survives it.
+		m.stopRuntime(id)
+		return nil
+	}
+	return m.activate(ctx, record, initFn)
+}
+
+// activate builds the candidate runtime from record while any old runtime keeps
+// serving, bumps the DB generation, and hands over. A disabled record stops the
+// runtime. Caller must hold the inbox's switch lock.
+func (m *Manager) activate(ctx context.Context, record imodels.Inbox, initFn initFn) error {
+	id := record.ID
+	if !record.Enabled {
+		m.stopRuntime(id)
 		return nil
 	}
 
-	// Only re-init if enabled.
-	if !record.Enabled {
-		return nil
+	candidate, err := initFn(record, m.msgStore, m.usrStore)
+	if err != nil {
+		if candidate != nil {
+			// Release everything the failed constructor already created.
+			_ = candidate.Close()
+		}
+		return m.runtimeInitError(id, err)
+	}
+
+	var gen int64
+	if err := m.queries.BumpGeneration.Get(&gen, id); err != nil {
+		_ = candidate.Close()
+		if err == sql.ErrNoRows {
+			// The inbox was deleted while the candidate was being built.
+			m.stopRuntime(id)
+			return nil
+		}
+		return m.persistenceError("bumping inbox runtime generation", err)
+	}
+	return m.handoff(ctx, candidate, gen)
+}
+
+// handoff is the single controlled takeover point for one inbox generation:
+// the old receiver is cancelled and fully awaited BEFORE the new object is
+// published and its receiver started, so two receivers never consume in
+// parallel. The replaced object is closed exactly once. A candidate belonging
+// to an older generation than the committed one is discarded and closed.
+// Caller must hold the inbox's switch lock.
+func (m *Manager) handoff(ctx context.Context, candidate Inbox, gen int64) error {
+	id := candidate.Identifier()
+
+	m.mu.Lock()
+	if current := m.runtimeGen[id]; current >= gen {
+		m.mu.Unlock()
+		m.lo.Warn("discarding stale inbox runtime generation", "id", id, "committed_generation", current, "candidate_generation", gen)
+		_ = candidate.Close()
+		return envelope.NewError(envelope.ConflictError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
+	}
+	rs, hadReceiver := m.receivers[id]
+	if hadReceiver {
+		rs.cancel()
+		delete(m.receivers, id)
+	}
+	m.mu.Unlock()
+
+	// Wait outside the lock so the old receiver goroutine can finish. The old
+	// object stays registered and keeps serving sends during this wait.
+	if hadReceiver {
+		<-rs.done
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	inbox, err := initFn(record, m.msgStore, m.usrStore)
-	if err != nil {
-		return fmt.Errorf("initializing inbox %s: %w", record.Name, err)
+	// Re-check while awaiting the old receiver: a newer commit must win.
+	if current := m.runtimeGen[id]; current >= gen {
+		_ = candidate.Close()
+		m.lo.Warn("discarding stale inbox runtime generation after receiver drain", "id", id, "committed_generation", current, "candidate_generation", gen)
+		return envelope.NewError(envelope.ConflictError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
-	m.inboxes[inbox.Identifier()] = inbox
-	m.startReceiver(ctx, inbox)
+
+	old := m.inboxes[id]
+	m.inboxes[id] = candidate
+	m.runtimeGen[id] = gen
+	m.startReceiver(ctx, candidate)
+
+	if old != nil {
+		if err := old.Close(); err != nil {
+			m.lo.Error("error closing replaced inbox runtime", "id", id, "error", err)
+		}
+	}
 	return nil
 }
 
-// Update updates an inbox in the DB.
-func (m *Manager) Update(id int, inbox imodels.Inbox) (imodels.Inbox, error) {
+// stopRuntime cancels and waits for the receiver, then removes and closes the
+// runtime object exactly once. It is the intentional stop path for disabled
+// and deleted inboxes. Caller must hold the inbox's switch lock.
+func (m *Manager) stopRuntime(id int) {
+	m.mu.Lock()
+	rs, hadReceiver := m.receivers[id]
+	if hadReceiver {
+		rs.cancel()
+		delete(m.receivers, id)
+	}
+	old, hadInbox := m.inboxes[id]
+	if hadInbox {
+		delete(m.inboxes, id)
+	}
+	delete(m.runtimeGen, id)
+	m.mu.Unlock()
+
+	// Wait outside the lock so the receiver goroutine can finish.
+	if hadReceiver {
+		<-rs.done
+	}
+	if hadInbox {
+		if err := old.Close(); err != nil {
+			m.lo.Error("error closing stopped inbox runtime", "id", id, "error", err)
+		}
+	}
+}
+
+// runtimeInitError turns a candidate constructor failure into an actionable
+// error for the administrator; the pre-save state is left untouched.
+func (m *Manager) runtimeInitError(id int, err error) error {
+	m.lo.Error("inbox runtime candidate failed, keeping previous runtime", "id", id, "error", err)
+	return envelope.NewError(envelope.InputError, m.i18n.Ts("inbox.runtimeInitFailed", "error", err.Error()), nil)
+}
+
+// Update updates an inbox in the DB and hot-swaps its runtime as one
+// per-inbox serialized configuration generation:
+//
+//   - While the old runtime keeps serving, the replacement candidate is
+//     constructed and verified. On failure the candidate's partial resources
+//     are closed, the transaction is rolled back and an actionable error is
+//     returned; persisted config, aliases, secret placeholders, the old
+//     receiver and the old sender all remain at their pre-save state.
+//   - Only once the candidate is usable does the same generation commit in the
+//     DB, after which the runtime is replaced at one controlled handoff point
+//     (stop old receiver -> publish new object -> start new receiver).
+//
+// When initFn is nil, only persistence is performed (no runtime takeover).
+func (m *Manager) Update(ctx context.Context, id int, inbox imodels.Inbox, initFn initFn) (updated imodels.Inbox, err error) {
+	defer m.lockInbox(id)()
+
 	tx, err := m.db.Beginx()
 	if err != nil {
 		return imodels.Inbox{}, m.persistenceError("starting inbox update", err)
@@ -517,6 +675,34 @@ func (m *Manager) Update(id int, inbox imodels.Inbox) (imodels.Inbox, error) {
 		return imodels.Inbox{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 
+	// Build and verify the replacement runtime BEFORE committing, while the old
+	// runtime keeps serving. The candidate is not registered and has no
+	// receiver yet; on failure it is closed and the commit never happens.
+	var candidate Inbox
+	if initFn != nil && inbox.Enabled {
+		candidateRecord := current
+		candidateRecord.Channel = current.Channel
+		candidateRecord.Config = inbox.Config
+		candidateRecord.Name = inbox.Name
+		candidateRecord.From = inbox.From
+		candidateRecord.FromNameTemplate = inbox.FromNameTemplate
+		candidateRecord.CSATEnabled = inbox.CSATEnabled
+		candidateRecord.PromptTagsOnReply = inbox.PromptTagsOnReply
+		candidateRecord.ReopenWindowHours = inbox.ReopenWindowHours
+		candidateRecord.Enabled = inbox.Enabled
+		candidateRecord.Secret = inbox.Secret
+		candidateRecord.LinkedEmailInboxID = inbox.LinkedEmailInboxID
+		candidateRecord.Aliases = inbox.Aliases
+
+		candidate, err = initFn(candidateRecord, m.msgStore, m.usrStore)
+		if err != nil {
+			if candidate != nil {
+				_ = candidate.Close()
+			}
+			return imodels.Inbox{}, m.runtimeInitError(id, err)
+		}
+	}
+
 	var updatedInbox imodels.Inbox
 	if err := tx.Stmtx(m.queries.Update).Get(&updatedInbox, id, inbox.Channel, encryptedConfig, inbox.Name, inbox.From, inbox.CSATEnabled, inbox.PromptTagsOnReply, inbox.ReopenWindowHours, inbox.Enabled, inbox.Secret, inbox.LinkedEmailInboxID, inbox.FromNameTemplate); err != nil {
 		m.lo.Error("error updating inbox", "error", err)
@@ -561,7 +747,22 @@ func (m *Manager) Update(id int, inbox imodels.Inbox) (imodels.Inbox, error) {
 		updatedInbox.Aliases = inbox.Aliases
 	}
 	if err := tx.Commit(); err != nil {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
 		return imodels.Inbox{}, m.persistenceError("committing inbox update", err)
+	}
+
+	// The committed generation now takes over the runtime at the single
+	// controlled handoff point. Disabling intentionally stops the runtime.
+	if initFn != nil {
+		if inbox.Enabled {
+			if err := m.handoff(ctx, candidate, updatedInbox.RuntimeGeneration); err != nil {
+				return imodels.Inbox{}, err
+			}
+		} else {
+			m.stopRuntime(id)
+		}
 	}
 
 	// Decrypt before returning
@@ -608,21 +809,40 @@ func (m *Manager) MergeWhatsAppSecrets(current, update json.RawMessage) (json.Ra
 	return merged, nil
 }
 
-// Toggle toggles the status of an inbox in the DB.
-func (m *Manager) Toggle(ctx context.Context, id int) (imodels.Inbox, error) {
+// Toggle flips the enabled state of an inbox in the DB and intentionally stops
+// the runtime when disabling or builds and starts a single new receiver when
+// enabling. Serialized per inbox.
+func (m *Manager) Toggle(ctx context.Context, id int, initFn initFn) (imodels.Inbox, error) {
+	defer m.lockInbox(id)()
+
 	if _, err := m.queries.Toggle.ExecContext(ctx, id); err != nil {
 		m.lo.Error("error toggling inbox", "error", err)
 		return imodels.Inbox{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
-	return m.GetDBRecord(id)
+
+	record, err := m.GetDBRecord(id)
+	if err != nil {
+		return imodels.Inbox{}, err
+	}
+
+	if initFn != nil {
+		if err := m.activate(ctx, record, initFn); err != nil {
+			return imodels.Inbox{}, err
+		}
+	}
+	return record, nil
 }
 
-// SoftDelete soft deletes an inbox in the DB.
+// SoftDelete soft deletes an inbox in the DB and intentionally stops its
+// runtime. Serialized per inbox.
 func (m *Manager) SoftDelete(id int) error {
+	defer m.lockInbox(id)()
+
 	if _, err := m.queries.SoftDelete.Exec(id); err != nil {
 		m.lo.Error("error deleting inbox", "error", err)
 		return envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
+	m.stopRuntime(id)
 	return nil
 }
 
@@ -755,30 +975,6 @@ func (m *Manager) CloseLiveChatClients() int {
 		n++
 	}
 	return n
-}
-
-// stopInbox cancels the receiver for a single inbox, waits for its goroutine
-// to exit, then closes the inbox. Caller must NOT hold m.mu.
-func (m *Manager) stopInbox(id int) {
-	m.mu.Lock()
-	rs, hasReceiver := m.receivers[id]
-	if hasReceiver {
-		rs.cancel()
-		delete(m.receivers, id)
-	}
-	m.mu.Unlock()
-
-	// Wait outside lock so the receiver goroutine can finish.
-	if hasReceiver {
-		<-rs.done
-	}
-
-	m.mu.Lock()
-	if inb, ok := m.inboxes[id]; ok {
-		inb.Close()
-		delete(m.inboxes, id)
-	}
-	m.mu.Unlock()
 }
 
 // startReceiver starts a receiver goroutine for the given inbox.

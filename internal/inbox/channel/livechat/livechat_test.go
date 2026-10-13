@@ -2,8 +2,37 @@ package livechat
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+// TestLiveChatCloseIsIdempotent guarantees widget clients are disconnected and
+// their disconnect callbacks run exactly once, even when replacement, disable
+// and shutdown paths all close the inbox.
+func TestLiveChatCloseIsIdempotent(t *testing.T) {
+	lc, err := New(nil, nil, Opts{ID: 1, Name: "close-test"})
+	require.NoError(t, err)
+
+	var disconnects atomic.Int32
+	client, err := lc.AddClient("visitor-1", func() { disconnects.Add(1) })
+	require.NoError(t, err)
+
+	require.NoError(t, lc.Close())
+	require.NoError(t, lc.Close())
+
+	require.True(t, client.IsClosed())
+	require.Equal(t, int32(1), disconnects.Load())
+
+	// A client joining the already replaced/closed object stays isolated and
+	// does not resurrect disconnected clients.
+	other, err := lc.AddClient("visitor-2", func() { disconnects.Add(1) })
+	require.NoError(t, err)
+	require.True(t, client.IsClosed())
+	require.False(t, other.IsClosed())
+	lc.Close()
+}
 
 func TestResolvePreChatFormFallsBackToLegacyValues(t *testing.T) {
 	var config Config

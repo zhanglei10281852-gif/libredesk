@@ -110,6 +110,10 @@ func NewSmtpPool(configs []imodels.SMTPConfig, oauth *imodels.OAuthConfig) ([]*s
 			TLSConfig:         cfg.TLSConfig,
 		})
 		if err != nil {
+			// A failed candidate must not leak the pools built before it.
+			for _, p := range pools {
+				p.Close()
+			}
 			return nil, err
 		}
 		pools = append(pools, pool)
@@ -120,6 +124,13 @@ func NewSmtpPool(configs []imodels.SMTPConfig, oauth *imodels.OAuthConfig) ([]*s
 
 // Send sends an email using one of the configured SMTP servers.
 func (e *Email) Send(m models.OutboundMessage) error {
+	e.smtpPoolsMu.RLock()
+	closed := e.closed
+	e.smtpPoolsMu.RUnlock()
+	if closed {
+		return fmt.Errorf("inbox %d is closed", e.Identifier())
+	}
+
 	// Refresh OAuth token if needed
 	oauthConfig, _, err := e.refreshOAuthIfNeeded()
 	if err != nil {
@@ -129,6 +140,10 @@ func (e *Email) Send(m models.OutboundMessage) error {
 	// Recreate SMTP pools if token changed (handles both: we refreshed or IMAP refreshed)
 	if e.authType == imodels.AuthTypeOAuth2 && oauthConfig != nil {
 		e.smtpPoolsMu.Lock()
+		if e.closed {
+			e.smtpPoolsMu.Unlock()
+			return fmt.Errorf("inbox %d is closed", e.Identifier())
+		}
 		if e.smtpPoolsToken != oauthConfig.AccessToken {
 			// Close existing pools
 			for _, p := range e.smtpPools {

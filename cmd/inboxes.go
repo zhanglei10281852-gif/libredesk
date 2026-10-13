@@ -206,9 +206,14 @@ func handleCreateInbox(r *fastglue.Request) error {
 		return sendErrorEnvelope(r, err)
 	}
 
-	if err := reloadInbox(app, createdInbox.ID); err != nil {
-		app.lo.Error("error reloading inbox", "id", createdInbox.ID, "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
+	initFn := makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app))
+	if err := app.inbox.StartInbox(app.ctx, createdInbox.ID, initFn); err != nil {
+		app.lo.Error("error starting inbox runtime", "id", createdInbox.ID, "error", err)
+		return sendErrorEnvelope(r, err)
+	}
+	app.inboxAuthErrors.Delete(createdInbox.ID)
+	if err := ensureWhatsAppIngester(app); err != nil {
+		app.lo.Error("error starting whatsapp ingester after an inbox change", "id", createdInbox.ID, "error", err)
 	}
 
 	if createdInbox.Channel == whatsappChannel.ChannelWhatsApp {
@@ -266,14 +271,18 @@ func handleUpdateInbox(r *fastglue.Request) error {
 		}
 	}
 
-	updatedInbox, err := app.inbox.Update(id, inbox)
+	// Persist and hot-swap in one serialized generation: the candidate runtime
+	// is constructed and verified before the commit. A failure returns an
+	// actionable error and leaves the old config and runtime untouched.
+	initFn := makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app))
+	updatedInbox, err := app.inbox.Update(app.ctx, id, inbox, initFn)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
 
-	if err := reloadInbox(app, id); err != nil {
-		app.lo.Error("error reloading inbox", "id", id, "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
+	app.inboxAuthErrors.Delete(id)
+	if err := ensureWhatsAppIngester(app); err != nil {
+		app.lo.Error("error starting whatsapp ingester after an inbox change", "id", id, "error", err)
 	}
 
 	if updatedInbox.Channel == whatsappChannel.ChannelWhatsApp {
@@ -301,14 +310,15 @@ func handleToggleInbox(r *fastglue.Request) error {
 			app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.InputError)
 	}
 
-	toggledInbox, err := app.inbox.Toggle(r.RequestCtx, id)
+	initFn := makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app))
+	toggledInbox, err := app.inbox.Toggle(app.ctx, id, initFn)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
 
-	if err := reloadInbox(app, id); err != nil {
-		app.lo.Error("error reloading inbox", "id", id, "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
+	app.inboxAuthErrors.Delete(id)
+	if err := ensureWhatsAppIngester(app); err != nil {
+		app.lo.Error("error starting whatsapp ingester after an inbox change", "id", id, "error", err)
 	}
 
 	// Clear passwords before returning
@@ -328,14 +338,13 @@ func handleDeleteInbox(r *fastglue.Request) error {
 		id, _ = strconv.Atoi(r.RequestCtx.UserValue("id").(string))
 	)
 	deleted, recErr := app.inbox.GetDBRecord(id)
+	// SoftDelete intentionally stops and closes the runtime in the same
+	// serialized operation.
 	err := app.inbox.SoftDelete(id)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
-	if err := reloadInbox(app, id); err != nil {
-		app.lo.Error("error reloading inbox", "id", id, "error", err)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
-	}
+	app.inboxAuthErrors.Delete(id)
 	if recErr == nil && deleted.Channel == whatsappChannel.ChannelWhatsApp {
 		go repointWhatsAppWebhookAfterDelete(app, deleted)
 	}

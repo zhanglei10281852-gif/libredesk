@@ -1548,6 +1548,7 @@
   "inbox.oauthAlreadyExists": "An inbox with this email already exists. Use Reconnect to update credentials.",
   "inbox.oauthEmailMismatch": "The authorized email doesn't match this inbox. Please authorize with the correct account.",
   "inbox.oauthNotFound": "No inbox found with this email to reconnect.",
+  "inbox.runtimeInitFailed": "The inbox could not start with the new settings: {error}. The previous configuration is still active.",
   "macro.actionNotAllowed": "{name} action not allowed",
   "macro.actionType": "Action type",
   "macro.applied": "Macro applied",

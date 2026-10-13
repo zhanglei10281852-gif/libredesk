@@ -56,19 +56,19 @@ func TestInboxEmailAddresses(t *testing.T) {
 	_, err = mgr.Create(makeInbox("Alias listed twice", "help@example.com", "desk@example.com", "DESK@example.com"))
 	require.Error(t, err)
 
-	updated, err := mgr.Update(first.ID, makeInbox("Support", "support@example.com", "accounts@example.com"))
+	updated, err := mgr.Update(ctx, first.ID, makeInbox("Support", "support@example.com", "accounts@example.com"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "accounts@example.com", updated.Aliases[0].Email)
 	var status string
 	_, err = db.ExecContext(ctx, `UPDATE inbox_email_addresses SET verification_status = 'verified' WHERE inbox_id = $1 AND email = 'accounts@example.com'`, first.ID)
 	require.NoError(t, err)
-	_, err = mgr.Update(first.ID, makeInbox("Support updated", "support@example.com", "accounts@example.com"))
+	_, err = mgr.Update(ctx, first.ID, makeInbox("Support updated", "support@example.com", "accounts@example.com"), nil)
 	require.NoError(t, err)
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT verification_status FROM inbox_email_addresses WHERE inbox_id = $1 AND email = 'accounts@example.com'`, first.ID).Scan(&status))
 	require.Equal(t, "verified", status)
 	_, err = db.ExecContext(ctx, `UPDATE inbox_email_addresses SET verification_status = 'pending', verification_token = 'pending-token', verification_started_at = '2025-01-01 12:00:00+00' WHERE inbox_id = $1 AND email = 'accounts@example.com'`, first.ID)
 	require.NoError(t, err)
-	_, err = mgr.Update(first.ID, makeInbox("Support pending", "support@example.com", "accounts@example.com"))
+	_, err = mgr.Update(ctx, first.ID, makeInbox("Support pending", "support@example.com", "accounts@example.com"), nil)
 	require.NoError(t, err)
 	var verificationToken string
 	var verificationStartedAt string
@@ -96,7 +96,7 @@ func TestInboxEmailAddresses(t *testing.T) {
 		for range 2 {
 			go func() {
 				<-start
-				_, err := mgr.Update(first.ID, makeInbox("Concurrent save", "support@example.com", "accounts@example.com"))
+				_, err := mgr.Update(ctx, first.ID, makeInbox("Concurrent save", "support@example.com", "accounts@example.com"), nil)
 				results <- err
 			}()
 		}
@@ -118,7 +118,7 @@ func TestInboxEmailAddresses(t *testing.T) {
 
 	omitted := makeInbox("Omitted aliases", "support@example.com")
 	omitted.Aliases = nil
-	updated, err = mgr.Update(first.ID, omitted)
+	updated, err = mgr.Update(ctx, first.ID, omitted, nil)
 	require.NoError(t, err)
 	require.Len(t, updated.Aliases, 1)
 	require.Equal(t, imodels.AliasVerificationVerified, updated.Aliases[0].VerificationStatus)
@@ -171,13 +171,13 @@ func TestInboxEmailAddresses(t *testing.T) {
 	newConfig.SMTP[0].Host = "replacement.example.com"
 	record.Config, err = json.Marshal(newConfig)
 	require.NoError(t, err)
-	updated, err = mgr.Update(first.ID, record)
+	updated, err = mgr.Update(ctx, first.ID, record, nil)
 	require.NoError(t, err)
 	require.Equal(t, imodels.AliasVerificationNotVerified, updated.Aliases[0].VerificationStatus)
 	require.Nil(t, updated.Aliases[0].VerifiedAt)
 
 	updated.Aliases = imodels.EmailAliases{}
-	updated, err = mgr.Update(first.ID, updated)
+	updated, err = mgr.Update(ctx, first.ID, updated, nil)
 	require.NoError(t, err)
 	require.Empty(t, updated.Aliases)
 
@@ -192,7 +192,7 @@ func TestLivechatSecretStaysEncryptedOnUpdate(t *testing.T) {
 	created, err := mgr.Create(imodels.Inbox{Name: "Chat", Channel: ChannelLiveChat, Enabled: true, Config: json.RawMessage(`{}`), Secret: null.StringFrom("widget-secret")})
 	require.NoError(t, err)
 	created.Secret = null.StringFrom(strings.Repeat(stringutil.PasswordDummy, 10))
-	_, err = mgr.Update(created.ID, created)
+	_, err = mgr.Update(context.Background(), created.ID, created, nil)
 	require.NoError(t, err)
 
 	var stored string

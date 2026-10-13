@@ -378,6 +378,40 @@ func TestSMTPTransportAndLongReferences(t *testing.T) {
 	}
 }
 
+// TestEmailCloseIsIdempotent guarantees the SMTP pools are closed exactly once
+// even when shutdown and a runtime replacement both close the inbox; the fork
+// of smtppool panics if Pool.Close runs twice.
+func TestEmailCloseIsIdempotent(t *testing.T) {
+	logger := logf.New(logf.Opts{Writer: io.Discard})
+	e, err := New(nil, nil, Opts{
+		ID:   1,
+		Name: "close-test",
+		Lo:   &logger,
+		Config: imodels.Config{
+			From: "support@example.com",
+			SMTP: []imodels.SMTPConfig{{Host: "smtp.example.com", Port: 587, TLSType: "none", MaxConns: 1}},
+			IMAP: []imodels.IMAPConfig{{Host: "imap.example.com", Port: 993, TLSType: "tls", Mailbox: "INBOX"}},
+		},
+	})
+	require.NoError(t, err)
+	require.NotPanics(t, func() {
+		require.NoError(t, e.Close())
+		require.NoError(t, e.Close())
+	})
+	require.Error(t, e.Send(models.OutboundMessage{From: "support@example.com", To: []string{"customer@example.net"}}))
+}
+
+// TestNewSmtpPoolCleansUpOnFailure verifies a constructor failure on a later
+// entry returns nil pools and does not panic closing the entries built before.
+func TestNewSmtpPoolCleansUpOnFailure(t *testing.T) {
+	pools, err := NewSmtpPool([]imodels.SMTPConfig{
+		{Host: "smtp.example.com", Port: 587, TLSType: "none", MaxConns: 1},
+		{Host: "smtp2.example.com", Port: 587, AuthProtocol: "bogus"},
+	}, nil)
+	require.Error(t, err)
+	require.Nil(t, pools)
+}
+
 func TestNewSmtpPoolDefaultRetries(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

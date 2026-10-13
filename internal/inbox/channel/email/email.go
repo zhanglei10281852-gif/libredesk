@@ -48,6 +48,8 @@ type Email struct {
 	messageStore              inbox.MessageStore
 	userStore                 inbox.UserStore
 	wg                        sync.WaitGroup
+	closeOnce                 sync.Once
+	closed                    bool
 	tokenRefreshCallback      TokenRefreshCallback
 	aliasVerificationCallback func(context.Context, string, string) error
 	aliasExpiryCallback       func(context.Context, time.Time) error
@@ -185,9 +187,21 @@ func (e *Email) Receive(ctx context.Context) error {
 	return nil
 }
 
-// Close cloes email channel by closing the smtp pool
+// Close closes the email channel by closing the SMTP pools. It is safe to
+// call more than once; every pool is closed exactly once (smtppool's
+// Pool.Close panics on a second call).
 func (e *Email) Close() error {
-	return e.closeSMTPPool()
+	e.closeOnce.Do(func() {
+		e.smtpPoolsMu.Lock()
+		e.closed = true
+		pools := e.smtpPools
+		e.smtpPools = nil
+		e.smtpPoolsMu.Unlock()
+		for _, p := range pools {
+			p.Close()
+		}
+	})
+	return nil
 }
 
 // Name returns the inbox name.
@@ -289,16 +303,6 @@ func (e *Email) clearAuthError() {
 	if e.authStatusCallback != nil {
 		e.authStatusCallback(e.Identifier(), true)
 	}
-}
-
-// closeSMTPPool closes the smtp pool.
-func (e *Email) closeSMTPPool() error {
-	e.smtpPoolsMu.Lock()
-	for _, p := range e.smtpPools {
-		p.Close()
-	}
-	e.smtpPoolsMu.Unlock()
-	return nil
 }
 
 // RefreshOAuthConfig refreshes an expired OAuth token and returns a new OAuth config.

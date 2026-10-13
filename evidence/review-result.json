@@ -1,0 +1,49 @@
+{
+  "id": "abhinavxd-libredesk-26d8a5c3-20bb-4f88-aa0b-cb48629c4d1a",
+  "expectedSyncRevision": 8,
+  "rounds": 87,
+  "harness": "Trae",
+  "completionStatus": "部分完成",
+  "collectionDecision": "收录：难题",
+  "reality": "管理员保存邮件、在线聊天或 WhatsApp 收件箱后，数据库配置、内存中的 channel 对象、接收 goroutine 和外部连接共同决定真实服务状态。候选配置构造失败或两个保存请求交错时，先关闭旧对象再初始化的流程会造成已提交配置与 active runtime 分离，因此修复必须覆盖持久事务、候选资源、并发发布和三类 channel 的关闭责任。",
+  "rubricResults": [
+    {
+      "id": 1,
+      "passed": false,
+      "reason": "候选接收资源没有在数据库提交前启动并验证，Receive 错误只记录日志且不会传回 Update"
+    },
+    {
+      "id": 2,
+      "passed": false,
+      "reason": "连接初始化延迟到提交后的 receiver goroutine，失败时没有数据库回滚或旧 receiver 恢复路径"
+    },
+    {
+      "id": 3,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 4,
+      "passed": false,
+      "reason": "新 receiver 的启动与存活没有成为 handoff 成功条件，旧 receiver 在新 receiver 可用前已经停止并关闭"
+    },
+    {
+      "id": 5,
+      "passed": false,
+      "reason": "资源 Close 失败没有传回主流程，也没有持久清理或重试边界"
+    },
+    {
+      "id": 6,
+      "passed": true,
+      "reason": ""
+    },
+    {
+      "id": 7,
+      "passed": true,
+      "reason": ""
+    }
+  ],
+  "runResult": "1 未通过 候选接收资源没有在数据库提交前启动并验证，Receive 错误只记录日志且不会传回 Update\n2 未通过 连接初始化延迟到提交后的 receiver goroutine，失败时没有数据库回滚或旧 receiver 恢复路径\n3 通过\n4 未通过 新 receiver 的启动与存活没有成为 handoff 成功条件，旧 receiver 在新 receiver 可用前已经停止并关闭\n5 未通过 资源 Close 失败没有传回主流程，也没有持久清理或重试边界\n6 通过\n7 通过",
+  "artifactResult": "1 未通过 候选接收资源没有在数据库提交前启动并验证，Receive 错误只记录日志且不会传回 Update\n2 未通过 连接初始化延迟到提交后的 receiver goroutine，失败时没有数据库回滚或旧 receiver 恢复路径\n3 通过\n4 未通过 新 receiver 的启动与存活没有成为 handoff 成功条件，旧 receiver 在新 receiver 可用前已经停止并关闭\n5 未通过 资源 Close 失败没有传回主流程，也没有持久清理或重试边界\n6 通过\n7 通过",
+  "artifactMaterials": "同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。inbox、email、livechat 无缓存测试和关键切换测试连续 12 次通过；代码审计确认 Receive 连接初始化发生在数据库提交与旧 receiver 停止之后，错误仅记录日志，Close 失败也不返回主流程。"
+}

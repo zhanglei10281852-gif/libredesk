@@ -45,6 +45,9 @@ type Inbox struct {
 	Config             json.RawMessage `db:"config" json:"config"`
 	Secret             null.String     `db:"secret" json:"secret"`
 	LinkedEmailInboxID null.Int        `db:"linked_email_inbox_id" json:"linked_email_inbox_id"`
+	// RuntimeGeneration is the committed config generation the inbox's active
+	// runtime must match. Not exposed over the API.
+	RuntimeGeneration int64 `db:"runtime_generation" json:"-"`
 	// Computed, not persisted. The URL the admin pastes into Meta's webhook config.
 	WebhookURL string `db:"-" json:"webhook_url,omitempty"`
 	// Computed, not persisted. True when Meta recently rejected this inbox's access token.

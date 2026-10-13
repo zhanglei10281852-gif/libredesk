@@ -226,6 +226,7 @@ type LiveChat struct {
 	signAvatarURL func(*null.String)   // Signs a raw /uploads/ avatar path into a signed URL.
 	clients       map[string][]*Client // Maps user IDs to slices of clients (to handle multiple devices)
 	clientsMutex  sync.RWMutex
+	closeOnce     sync.Once
 }
 
 // Opts holds the options required for the live chat inbox.
@@ -477,18 +478,24 @@ func (lc *LiveChat) Send(message models.OutboundMessage) error {
 	return nil
 }
 
+// Close disconnects all widget clients. It is safe to call multiple times
+// (shutdown, replacement, disable and delete paths can all reach it); the
+// clients and their disconnect callbacks run exactly once.
 func (lc *LiveChat) Close() error {
-	lc.clientsMutex.Lock()
-	defer lc.clientsMutex.Unlock()
-	for _, clients := range lc.clients {
-		for _, c := range clients {
-			c.CloseChannel()
-			if c.disconnect != nil {
-				c.disconnect()
+	lc.closeOnce.Do(func() {
+		lc.clientsMutex.Lock()
+		clients := lc.clients
+		lc.clients = make(map[string][]*Client)
+		lc.clientsMutex.Unlock()
+		for _, cs := range clients {
+			for _, c := range cs {
+				c.CloseChannel()
+				if c.disconnect != nil {
+					c.disconnect()
+				}
 			}
 		}
-	}
-	lc.clients = make(map[string][]*Client)
+	})
 	return nil
 }
 

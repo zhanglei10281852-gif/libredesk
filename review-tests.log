@@ -1,0 +1,4 @@
+ok  	github.com/abhinavxd/libredesk/internal/inbox	103.431s
+ok  	github.com/abhinavxd/libredesk/internal/inbox/channel/email	100.439s
+ok  	github.com/abhinavxd/libredesk/internal/inbox/channel/livechat	1.089s
+ok  	github.com/abhinavxd/libredesk/internal/inbox	178.753s

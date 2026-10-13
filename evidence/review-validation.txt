@@ -1,0 +1,5 @@
+题目：使收件箱保存与运行时切换保持同一配置代际
+Session：573311172224344:44243e3f6971be121f03edec2e42e6af_6ace030c68b0b2569578314c.6ace030c68b0b2569578314f.6ace030c68b0b2569578314d:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/13 18:08:12)
+有效轮数：87｜Harness：Trae｜证据来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：部分完成｜收录：难题
+同一 Trae Session 原始轨迹、登记基线差异、严格 YAML Rubric、逐条代码审计报告和唯一截图均保存在本题 evidence 目录。inbox、email、livechat 无缓存测试和关键切换测试连续 12 次通过；代码审计确认 Receive 连接初始化发生在数据库提交与旧 receiver 停止之后，错误仅记录日志，Close 失败也不返回主流程。

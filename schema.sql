@@ -124,6 +124,7 @@ CREATE TABLE inboxes (
 	from_name_template TEXT NOT NULL DEFAULT '',
 	secret TEXT NULL,
 	linked_email_inbox_id INT REFERENCES inboxes(id) ON DELETE SET NULL,
+	runtime_generation BIGINT NOT NULL DEFAULT 0,
 	CONSTRAINT constraint_inboxes_on_name CHECK (length("name") <= 140)
 );
 
