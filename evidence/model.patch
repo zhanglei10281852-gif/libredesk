@@ -3643,32 +3643,32 @@ HcmV?d00001
 
 diff --git a/evidence/verify_rubric.yaml b/evidence/verify_rubric.yaml
 new file mode 100644
-index 00000000..7a32eae1
+index 00000000..8c3913a6
 --- /dev/null
 +++ b/evidence/verify_rubric.yaml
 @@ -0,0 +1,22 @@
 +rubrics:
 +  - id: 1
 +    type: f2p
-+    text: "一次 Meta payload 中的消息、状态和模板目标被赋予重投与重启后稳定的事件身份，并持久保存各自 pending、成功、可重试或永久终态。"
++    text: 一次 Meta payload 中的消息、状态和模板目标被赋予重投与重启后稳定的事件身份，并持久保存各自 pending、成功、可重试或永久终态。
 +  - id: 2
 +    type: f2p
-+    text: "混合 payload 中一个事件瞬态失败时，已成功的消息、回执和模板目标不会再次执行副作用；恢复后只补做未完成事件并最终确认原 stream entry。"
++    text: 混合 payload 中一个事件瞬态失败时，已成功的消息、回执和模板目标不会再次执行副作用；恢复后只补做未完成事件并最终确认原 stream entry。
 +  - id: 3
 +    type: f2p
-+    text: "入站消息继续按发送者串行，媒体或存储故障跨 worker 重领和进程重启后可恢复，且不会重复下载已完成媒体、插入消息或创建会话。"
++    text: 入站消息继续按发送者串行，媒体或存储故障跨 worker 重领和进程重启后可恢复，且不会重复下载已完成媒体、插入消息或创建会话。
 +  - id: 4
 +    type: f2p
-+    text: "状态早于消息到达时在既有宽限期内重试，重复或乱序的 sent、delivered、read、failed 回执不会回退有效状态或重复广播。"
++    text: 状态早于消息到达时在既有宽限期内重试，重复或乱序的 sent、delivered、read、failed 回执不会回退有效状态或重复广播。
 +  - id: 5
 +    type: f2p
-+    text: "模板状态 fan-out 到多个 WhatsApp 收件箱时按目标独立收敛，一个目标失败不会重做成功目标，恢复后能补齐失败目标及其后续动作。"
++    text: 模板状态 fan-out 到多个 WhatsApp 收件箱时按目标独立收敛，一个目标失败不会重做成功目标，恢复后能补齐失败目标及其后续动作。
 +  - id: 6
 +    type: f2p
-+    text: "永久不可处理的单个业务事件会留下可诊断终态并允许同批其他事件完成；delivery 仅在全部事件终态后确认，不会因一个坏事件整体反复进入死信。"
++    text: 永久不可处理的单个业务事件会留下可诊断终态并允许同批其他事件完成；delivery 仅在全部事件终态后确认，不会因一个坏事件整体反复进入死信。
 +  - id: 7
 +    type: p2p
-+    text: "Webhook 验签、Redis 入队失败响应、完全无法解析 payload 的 poison 处理、无匹配或禁用收件箱以及普通单事件成功路径保持现有兼容行为。"
++    text: Webhook 验签、Redis 入队失败响应、完全无法解析 payload 的 poison 处理、无匹配或禁用收件箱以及普通单事件成功路径保持现有兼容行为。
 diff --git a/internal/conversation/queries.sql b/internal/conversation/queries.sql
 index 76a76ab5..1fcba8ad 100644
 --- a/internal/conversation/queries.sql
